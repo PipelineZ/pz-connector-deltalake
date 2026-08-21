@@ -5,14 +5,17 @@ namespace Pz.Connector.DeltaLake.Tests;
 public class DeltaLocationTests
 {
     [Theory]
-    [InlineData("s3://warehouse/delta", DeltaScheme.S3)]
-    [InlineData("s3a://warehouse/delta", DeltaScheme.S3)]
-    [InlineData("az://fs/delta", DeltaScheme.Azure)]
-    [InlineData("abfss://fs@acct.dfs.core.windows.net/delta", DeltaScheme.Azure)]
-    [InlineData("/mnt/lake", DeltaScheme.Local)]
-    [InlineData("file:///mnt/lake", DeltaScheme.Local)]
-    public void ClassifyRoot_recognizes_every_supported_scheme(string root, DeltaScheme expected) =>
+    [InlineData("s3://warehouse/delta", "S3")]
+    [InlineData("s3a://warehouse/delta", "S3")]
+    [InlineData("az://fs/delta", "Azure")]
+    [InlineData("abfss://fs@acct.dfs.core.windows.net/delta", "Azure")]
+    [InlineData("/mnt/lake", "Local")]
+    [InlineData("file:///mnt/lake", "Local")]
+    public void ClassifyRoot_recognizes_every_supported_scheme(string root, string expectedName)
+    {
+        var expected = Enum.Parse<DeltaScheme>(expectedName);
         Assert.Equal(expected, DeltaLocation.ClassifyRoot(root));
+    }
 
     [Theory]
     [InlineData("hdfs://nn/delta")]

@@ -5,7 +5,7 @@ namespace Pz.Connector.DeltaLake;
 /// <summary>Which storage family a <c>root:</c> names. Decides both the DuckDB extension + secret the
 /// source loads and the delta-rs storage options the sink builds — one connection config, two
 /// translations, which is why the classification lives in one place.</summary>
-public enum DeltaScheme
+internal enum DeltaScheme
 {
     Local,
     S3,
