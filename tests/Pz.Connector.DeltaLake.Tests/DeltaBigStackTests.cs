@@ -72,15 +72,28 @@ public class DeltaBigStackTests
     }
 
     [Fact]
-    public async Task Many_sequential_calls_do_not_leak_threads()
+    public async Task Many_sequential_calls_each_terminate_their_own_thread()
     {
-        var before = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+        // A process-wide Process.GetCurrentProcess().Threads.Count is the wrong observable here:
+        // it includes GC, thread-pool, and finalizer threads this code does not control, and their
+        // count moves on the runtime's own schedule, not this gate's. It also races the gate itself
+        // — TaskCreationOptions.RunContinuationsAsynchronously means the awaited continuation can
+        // resume before the worker thread's OS-level teardown has finished, so "after" can observe
+        // a thread that is still exiting.
+        //
+        // What IS deterministically observable and fully controlled by this code: the exact Thread
+        // that RunAsync creates for one call. The work delegate always runs ON that thread (that is
+        // the whole point of DeltaBigStack), so capturing Thread.CurrentThread from inside it yields
+        // the very Thread object RunAsync started — not a proxy for it. Joining that specific thread
+        // with a bounded timeout is a real synchronization primitive (not a sleep): it blocks only
+        // until that thread's OS-level teardown is complete, or fails loudly if it never is.
         for (var i = 0; i < 200; i++)
         {
-            await DeltaBigStack.RunAsync(() => Task.FromResult(i));
-        }
+            var thread = await DeltaBigStack.RunAsync(() => Task.FromResult(Thread.CurrentThread));
 
-        var after = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
-        Assert.True(after - before < 50, $"thread count grew from {before} to {after}");
+            Assert.True(
+                thread.Join(TimeSpan.FromSeconds(5)),
+                $"iteration {i}: gate thread '{thread.Name}' did not terminate within 5s of returning its result");
+        }
     }
 }
