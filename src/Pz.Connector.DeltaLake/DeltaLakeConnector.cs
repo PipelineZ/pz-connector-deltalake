@@ -45,5 +45,5 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
         new(new DeltaLakeSource(config));
 
     ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+        new(new DeltaLakeSink(config));
 }
