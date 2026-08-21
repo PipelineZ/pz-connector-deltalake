@@ -92,6 +92,8 @@ internal static class DeltaMergeSql
         var columns = schema.FieldsList.Select(f => f.Name).ToList();
         var keys = options.Keys;
 
+        RefuseUnquotableNames(columns, keys, partitionFilters);
+
         // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive, so a key spelled
         // "ID" does not name the column "id" and must not silently exclude it from the UPDATE SET.
         var nonKeys = columns.Where(c => !keys.Contains(c, StringComparer.Ordinal)).ToList();
@@ -546,5 +548,65 @@ internal static class DeltaMergeSql
 
     private static bool IsIdentifierChar(char c) => char.IsAsciiLetterOrDigit(c) || c == '_';
 
-    private static string Q(string identifier) => $"\"{identifier.Replace("\"", "\"\"")}\"";
+    /// <summary>Refuses every name this statement would have to quote and cannot. Aggregated and
+    /// reported once: a user fixing one column name per run is a user running the pipeline once per
+    /// column.
+    ///
+    /// The set covers every name that reaches <see cref="Q"/> — the output's own columns, the merge
+    /// keys, and the partition columns — because the damage is not confined to the ON clause. Measured
+    /// against the shipped library on a table holding both a column named <c>a"b</c> and one named
+    /// <c>a""b</c>: as a key and partition column, the second name's rendered form resolves to the
+    /// FIRST column, the target row is invisible to the scan and the merge inserts a duplicate of a key
+    /// it should have matched; as an ordinary column, the same rendered form makes
+    /// <c>WHEN MATCHED THEN UPDATE SET</c> assign the first column twice and leave the second holding
+    /// its pre-merge value — silent stale data, no error, no key involved. On a table where no sibling
+    /// column absorbs the mangled name, the merge fails outright with "No field named".
+    ///
+    /// A name carrying ONE quote renders faithfully today — measured, matched, updated in place — so
+    /// this refusal costs it. That is the same trade taken for a partition VALUE carrying a quote and
+    /// for the same reason: telling the faithful case from the unfaithful one means modelling how a
+    /// foreign parser unescapes, which is the thing already known to differ between that parser's own
+    /// paths. A backslash is NOT refused here, and that is measured too, not an oversight: a column
+    /// named <c>back\</c> and one named <c>a\b</c> both render, match and update correctly, and the
+    /// one shape that would worry — a backslash immediately before the closing delimiter — needs a '"'
+    /// in the name, which is refused above.</summary>
+    private static void RefuseUnquotableNames(
+        IReadOnlyList<string> columns, IReadOnlyList<string> keys,
+        IReadOnlyList<PartitionFilter>? partitionFilters)
+    {
+        var offenders = columns
+            .Concat(keys)
+            .Concat((partitionFilters ?? []).Select(f => f.Column))
+            .Where(n => !IsQuotableName(n))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        if (offenders.Count == 0)
+        {
+            return;
+        }
+
+        throw DeltaErrors.Fail(DeltaErrors.UnquotableColumnName,
+            "strategy 'merge' cannot name these columns in a SQL statement because their names contain " +
+            $"a '\"': {string.Join(", ", offenders.Select(n => $"'{n}'"))}",
+            "rename them in the pipeline's SQL — a quote in a column name has to be doubled to be " +
+            "quoted, and the merge resolves a doubled quote to a different column than the one meant. " +
+            "Strategy append and replace are unaffected");
+    }
+
+    /// <summary>The precondition <see cref="Q"/> depends on, in one place so the aggregate report above
+    /// and the backstop below cannot drift apart.</summary>
+    private static bool IsQuotableName(string name) => !name.Contains('"');
+
+    /// <summary>Wraps a name that has already been refused if it contained a quote, so there is nothing
+    /// left to escape. The throw is a backstop, not the report: it exists so a future caller that
+    /// reaches this without going through <see cref="RefuseUnquotableNames"/> fails loudly rather than
+    /// emitting an identifier that silently names a different column.</summary>
+    private static string Q(string identifier) =>
+        IsQuotableName(identifier)
+            ? $"\"{identifier}\""
+            : throw DeltaErrors.Fail(DeltaErrors.UnquotableColumnName,
+                "a column name containing a '\"' reached the merge statement generator",
+                "report this as a connector bug: the name should have been refused before this point");
 }

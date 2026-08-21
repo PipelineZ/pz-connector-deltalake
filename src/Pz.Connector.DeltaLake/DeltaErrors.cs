@@ -37,6 +37,13 @@ internal static class DeltaErrors
     public const string UnwritableArrowType = "PZDL0302";
     public const string MergeKeyNotInSchema = "PZDL0303";
 
+    /// <summary>A column name a merge statement cannot carry. Delta column names come from the
+    /// pipeline's own SQL and may contain a '"'; quoting one into a merge statement means doubling it,
+    /// and the merge path unescapes a doubled quote one level further than the doubling put in — so the
+    /// name resolves to a DIFFERENT column, or to none. Merge-only: append and replace hand the name to
+    /// delta-rs directly and never build SQL from it.</summary>
+    public const string UnquotableColumnName = "PZDL0304";
+
     // Write, runtime.
     public const string CommitConflict = "PZDL0401";
     public const string DuplicateMergeKeys = "PZDL0402";
@@ -51,7 +58,8 @@ internal static class DeltaErrors
         UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, KeysOverlapPartitions, VersionOnWrite,
         CalendarTokenInReadPath, InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
         SchemaMismatch,
-        UnwritableArrowType, MergeKeyNotInSchema, CommitConflict, DuplicateMergeKeys, UnsafeConcurrentS3,
+        UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, CommitConflict, DuplicateMergeKeys,
+        UnsafeConcurrentS3,
         WriteFailed, UnsupportedProtocol,
     ];
 

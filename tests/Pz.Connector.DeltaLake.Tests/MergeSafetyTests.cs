@@ -176,6 +176,67 @@ public class MergeSafetyTests
         Assert.DoesNotContain(value, outcome.SkipReason!);
     }
 
+    [Theory]
+    [InlineData("string")]
+    [InlineData("stringview")]
+    [InlineData("largestring")]
+    public void The_refusal_applies_to_every_string_encoding(string encoding)
+    {
+        // Text() handles three encodings because which one arrives is a property of the plan that
+        // produced the batch, not of the column's Delta type — so a refusal pinned for only one of them
+        // is pinned for none. Measured consequence of getting this wrong: the value reaches Quote
+        // unrefused, the statement generator's own guard rejects the literal, and the merge fails with
+        // a coded write error — turning "an unhandleable value costs speed, never the write" into its
+        // exact opposite for data that used to write fine.
+        var options = Opts(["id", "dt"], ["dt"]);
+
+        Assert.Null(DeltaPartitionPredicate.Derive([OneValue(encoding, "it's")], options).Filters);
+        Assert.Null(DeltaPartitionPredicate.Derive([OneValue(encoding, "back\\")], options).Filters);
+
+        // And an ordinary value still derives through the same encoding, so a test that stopped
+        // deriving anything at all could not pass by accident.
+        Assert.Equal(
+            ["'plain'"],
+            DeltaPartitionPredicate.Derive([OneValue(encoding, "plain")], options).Filters!.Single().Literals);
+    }
+
+    /// <summary>One row carrying <paramref name="value"/> in the requested string encoding.</summary>
+    private static RecordBatch OneValue(string encoding, string value)
+    {
+        IArrowType type = encoding switch
+        {
+            "string" => StringType.Default,
+            "stringview" => StringViewType.Default,
+            _ => new LargeStringType(),
+        };
+        var schema = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(type).Nullable(false))
+            .Build();
+
+        IArrowArray values;
+        switch (encoding)
+        {
+            case "string":
+                var s = new StringArray.Builder();
+                s.Append(value);
+                values = s.Build();
+                break;
+            case "stringview":
+                var v = new StringViewArray.Builder();
+                v.Append(value);
+                values = v.Build();
+                break;
+            default:
+                var l = new LargeStringArray.Builder();
+                l.Append(value);
+                values = l.Build();
+                break;
+        }
+
+        return new RecordBatch(schema, [Ids(1), values], 1);
+    }
+
     [Fact]
     public void Every_string_literal_is_two_quotes_with_nothing_quote_shaped_between_them()
     {

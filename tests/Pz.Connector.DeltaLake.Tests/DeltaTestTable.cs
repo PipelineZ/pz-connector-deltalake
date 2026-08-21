@@ -93,6 +93,24 @@ internal static class DeltaTestTable
             return location;
         });
 
+    // The same as above for a fixture that needs particular ROWS rather than a count -- partition
+    // values a test chose on purpose, most of the time.
+    public static Task<string> CreateLocalFromAsync(
+        string dir, IReadOnlyList<(long Id, string Dt, double Amt)> rows, string[]? partitionBy = null,
+        string name = "orders") =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            var location = Path.Combine(dir, name);
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.CreateTableAsync(
+                new TableCreateOptions(location, Schema)
+                { PartitionBy = partitionBy ?? [], SaveMode = SaveMode.ErrorIfExists },
+                default);
+            await table.InsertAsync(
+                [RowsWithAmounts(rows)], Schema, new InsertOptions { SaveMode = SaveMode.Append }, default);
+            return location;
+        });
+
     // Version 0 has the 3-column Schema; a second, schema-evolving overwrite commit makes version 1 a
     // 4-column table -- the one fixture shape that lets a test prove 'version: 0' actually changes what
     // GetSchemaAsync returns, rather than merely accepting the option without acting on it.

@@ -452,25 +452,7 @@ public class MergeSafetyExecutionTests
 
     private static Task<string> CreatePartitionedAsync(
         string dir, IReadOnlyList<(long Id, string Dt, double Amt)> rows, string name = "orders") =>
-        DeltaBigStack.RunAsync(async () =>
-        {
-            // No ConfigureAwait(false) on this delegate's own awaits: DeltaBigStack pumps plain awaits
-            // back onto the big-stack thread, and opting out would run delta-rs on a default-stack pool
-            // thread.
-            var location = Path.Combine(dir, name);
-            using var engine = new DeltaEngine(EngineOptions.Default);
-            var table = await engine.CreateTableAsync(
-                new TableCreateOptions(location, DeltaTestTable.Schema)
-                {
-                    PartitionBy = ["dt"],
-                    SaveMode = SaveMode.ErrorIfExists,
-                },
-                default);
-            await table.InsertAsync(
-                [DeltaTestTable.RowsWithAmounts(rows)], DeltaTestTable.Schema,
-                new InsertOptions { SaveMode = SaveMode.Append }, default);
-            return location;
-        });
+        DeltaTestTable.CreateLocalFromAsync(dir, rows, ["dt"], name);
 
     private static Task MergeAsync(string location, string sql, RecordBatch source) =>
         DeltaBigStack.RunAsync(async () =>

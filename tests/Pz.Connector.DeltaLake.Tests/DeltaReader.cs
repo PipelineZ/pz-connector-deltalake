@@ -60,7 +60,7 @@ internal static class DeltaReader
     /// encoding the plan produced: a StringViewArray for an ordinary column, and a dictionary-encoded
     /// array for a PARTITION column, whose values live in directory names rather than in the data
     /// files. A straight cast to StringArray fails on both.</summary>
-    private static string Text(IArrowArray array, int index) => array switch
+    internal static string Text(IArrowArray array, int index) => array switch
     {
         StringArray s => s.GetString(index),
         StringViewArray v => v.GetString(index),

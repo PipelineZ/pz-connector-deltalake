@@ -256,20 +256,62 @@ public class DeltaMergeSqlTests
         Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
 
     [Fact]
-    public void Embedded_quotes_in_identifiers_are_doubled_not_passed_through()
+    public void A_column_name_containing_a_quote_is_refused_rather_than_doubled()
     {
         // Arrow column names come from the pipeline's own SQL, so a '"' in one is reachable without
-        // anybody writing it on purpose. Un-doubled, it would close the quoted identifier early.
+        // anybody writing it on purpose -- 'select 1 as "say ""hi"""' mints one, verified through
+        // DuckDB itself. Doubling it to quote it is what goes wrong: the merge path resolves the
+        // doubled form to a different column, so the statement silently constrains, updates or inserts
+        // the wrong one. MergeSafetyExecutionTests watches both consequences happen.
         var schema = new Apache.Arrow.Schema.Builder()
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
             .Field(f => f.Name("a\"b").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Build();
-        var sql = DeltaMergeSql.Build(schema, Opts(["id"]), [new PartitionFilter("x\"y", ["'1'"])]);
 
-        Assert.Contains("target.\"a\"\"b\" = source.\"a\"\"b\"", sql);
-        Assert.Contains("target.\"x\"\"y\" IN ('1')", sql);
-        Assert.DoesNotContain("\"a\"b\"", sql);
-        Assert.DoesNotContain("\"x\"y\"", sql);
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(schema, Opts(["id"]), null));
+        Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
+        Assert.Contains("a\"b", ex.Message);
+    }
+
+    [Fact]
+    public void Every_unquotable_name_is_reported_at_once_wherever_it_reaches_the_statement()
+    {
+        // Columns, keys and partition-filter columns all reach the quoting helper, so all three are
+        // checked -- and reported together, because a user fixing one name per run is a user running
+        // the pipeline once per column.
+        var schema = new Apache.Arrow.Schema.Builder()
+            .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("z\"col").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Build();
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(
+                schema, Opts(["id", "k\"key"], ["p\"part"]),
+                [new PartitionFilter("p\"part", ["'1'"])]));
+
+        Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
+        Assert.Contains("'k\"key'", ex.Message);
+        Assert.Contains("'p\"part'", ex.Message);
+        Assert.Contains("'z\"col'", ex.Message);
+    }
+
+    [Fact]
+    public void A_merge_predicate_naming_a_column_whose_name_carries_a_quote_is_refused_too()
+    {
+        // The predicate scanner un-doubles a quoted identifier the same way the generator doubles it,
+        // so a predicate naming such a column would be accepted while constraining a different one.
+        // It needs no rule of its own: the schema carrying the name is refused before the predicate is
+        // ever inspected, which is why this test asserts the SCHEMA's code and not the predicate's.
+        var schema = new Apache.Arrow.Schema.Builder()
+            .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("a\"\"b").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Build();
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(
+                schema, Opts(["id"], mergePredicate: "target.\"a\"\"\"\"b\" = 'x'"), null));
+        Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
     }
 
     [Fact]
@@ -319,6 +361,30 @@ public class DeltaMergeSqlTests
     }
 
     [Theory]
+    // A second value smuggled into one slot, and a value carrying the escape that is now refused.
+    [InlineData("'{0}', 'b'")]
+    [InlineData("'O''{0}'")]
+    [InlineData("{0}")]
+    public void The_partition_literal_refusal_does_not_echo_the_value_that_broke_it(string shape)
+    {
+        // A partition literal is derived from user DATA, which a merge_predicate is not: the message
+        // names the column and states the rule, and must not carry the value into an exception, a run
+        // artifact or a log. The marker is distinctive on purpose -- asserting this on a literal like
+        // "x" would pass or fail on whether the message happens to contain that letter, which it does
+        // ("Next step"), and a test that turns on a coincidence is not pinning anything.
+        const string Marker = "confidential-tenant";
+        var literal = string.Format(System.Globalization.CultureInfo.InvariantCulture, shape, Marker);
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(
+                DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]));
+
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        Assert.Contains("'dt'", ex.Message);
+        Assert.DoesNotContain(Marker, ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     // A ';' or a paren INSIDE the value is legal content, not a second value: the closing quote is
     // still the final character.
     [InlineData("'a;b'")]
@@ -333,8 +399,9 @@ public class DeltaMergeSqlTests
     }
 
     /// <summary>A schema whose column names exercise the shapes the word rules have to handle: one
-    /// needing quotes, one ending in '_', one ending in a digit, one containing a '"', and one whose
-    /// name is not all lower case.</summary>
+    /// needing quotes, one ending in '_', one ending in a digit, and one whose name is not all lower
+    /// case. A name containing a '"' is deliberately absent: such a schema cannot be merged at all
+    /// now, so it belongs to the refusal test above rather than to the word rules.</summary>
     private static Apache.Arrow.Schema AwkwardSchema() =>
         new Apache.Arrow.Schema.Builder()
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
@@ -343,7 +410,6 @@ public class DeltaMergeSqlTests
             .Field(f => f.Name("weird col").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(true))
             .Field(f => f.Name("a_").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Field(f => f.Name("a1").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
-            .Field(f => f.Name("q\"c").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(true))
             .Field(f => f.Name("Amt").DataType(Apache.Arrow.Types.DoubleType.Default).Nullable(true))
             .Build();
 
@@ -356,7 +422,6 @@ public class DeltaMergeSqlTests
     [InlineData("target.a1 = 'x'")]
     // A '"' inside a quoted column name is written doubled, and has to be read back as one character
     // before the name can be matched against the schema.
-    [InlineData("target.\"q\"\"c\" = 1")]
     // A column whose name is not all lower case is reachable by writing its name, in its own case,
     // either bare or quoted — which is what the merge path resolves.
     [InlineData("target.Amt >= 0")]

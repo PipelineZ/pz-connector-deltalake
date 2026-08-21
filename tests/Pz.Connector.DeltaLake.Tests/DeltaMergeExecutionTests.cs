@@ -99,6 +99,205 @@ public class DeltaMergeExecutionTests
         Assert.NotEqual(SourceRow.Dt, added.Dt);
     }
 
+    [Theory]
+    [InlineData("a'b", "'a''b'", 1)]
+    [InlineData("O'Brien", "'O''Brien'", 1)]
+    [InlineData("a''b", "'a''''b'", 2)]
+    [InlineData("a'''b", "'a''''''b'", 2)]
+    public async Task A_doubled_quote_in_a_predicate_is_faithful_once_and_not_twice(
+        string value, string literal, int expectedRows)
+    {
+        // The measurement the merge_predicate refusal was adopted on, pinned where a dialect change can
+        // fail it. ONE doubled quote is faithful: the predicate names the row it was written to name
+        // and the merge updates it in place. TWO in a row are not: the literal compares as a value with
+        // a level of doubling removed, the row that should have matched is invisible, and a second copy
+        // of the same key is inserted with no error.
+        //
+        // The statement is hand-built because Build now refuses every literal here, faithful or not --
+        // which is exactly the trade this test records. If delta-rs ever stops dropping the level, the
+        // 2s below become 1s, this test fails, and whoever reads it learns the refusal has outlived
+        // its reason rather than finding an assertion about a version nobody pinned.
+        var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
+        try
+        {
+            var location = await DeltaTestTable.CreateLocalFromAsync(
+                dir, [(0L, value, 0d)], ["dt"]);
+
+            await MergeSourceAsync(
+                location,
+                $"MERGE INTO target USING source ON target.\"id\" = source.\"id\" AND (target.dt = {literal})\n" +
+                "WHEN MATCHED THEN UPDATE SET target.\"dt\" = source.\"dt\", target.\"amt\" = source.\"amt\"\n" +
+                "WHEN NOT MATCHED THEN INSERT (\"id\", \"dt\", \"amt\") VALUES " +
+                "(source.\"id\", source.\"dt\", source.\"amt\")",
+                DeltaTestTable.RowsWithAmounts([(0L, value, 42d)]));
+
+            var after = await DeltaReader.RowsAsync(location);
+            Assert.Equal(expectedRows, after.Count);
+            if (expectedRows == 1)
+            {
+                Assert.Equal(42d, Assert.Single(after).Amt);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task An_escaped_column_name_would_constrain_a_different_column_and_duplicate_the_row()
+    {
+        // Why a column name carrying a quote is refused rather than doubled. The table holds two
+        // columns whose names differ only by one level of doubling; the merge is keyed and partitioned
+        // on the second. Doubling that name to quote it makes the merge resolve it to the FIRST column,
+        // so the ON clause constrains the wrong column, the target row is invisible to the scan, and a
+        // second row with the same key is inserted.
+        //
+        // The inserted row's own values are the clincher, not the count: the column that should have
+        // received the second source column's value holds the FIRST one's instead, because the INSERT
+        // clause mis-resolved the same way.
+        var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
+        try
+        {
+            var location = await CreateTwoQuotedColumnsAsync(dir, ["a\"\"b"]);
+
+            Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+                () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id", "a\"\"b"], ["a\"\"b"]), null));
+
+            await MergeQuotedAsync(
+                location,
+                "MERGE INTO target USING source ON target.\"id\" = source.\"id\" " +
+                "AND target.\"a\"\"\"\"b\" = source.\"a\"\"\"\"b\" AND target.\"a\"\"\"\"b\" IN ('TWO')\n" +
+                "WHEN MATCHED THEN UPDATE SET target.\"a\"\"b\" = source.\"a\"\"b\"\n" +
+                "WHEN NOT MATCHED THEN INSERT (\"id\", \"a\"\"b\", \"a\"\"\"\"b\") VALUES " +
+                "(source.\"id\", source.\"a\"\"b\", source.\"a\"\"\"\"b\")");
+
+            var rows = await ReadTwoQuotedColumnsAsync(location);
+            Assert.Equal(2, rows.Count);
+            var inserted = Assert.Single(rows, r => r.Second == "ONE-NEW");
+            Assert.Equal("ONE-NEW", inserted.First);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task An_escaped_column_name_would_leave_an_ordinary_column_stale_with_no_key_involved()
+    {
+        // The same mis-resolution where no key and no partition column is involved at all, which is why
+        // the refusal covers every column the statement names rather than only the merge keys. The
+        // UPDATE SET assigns the first column twice and never touches the second, so the row is updated,
+        // the merge succeeds, and one column silently keeps its pre-merge value.
+        var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
+        try
+        {
+            var location = await CreateTwoQuotedColumnsAsync(dir, []);
+
+            Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+                () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id"]), null));
+
+            await MergeQuotedAsync(
+                location,
+                "MERGE INTO target USING source ON target.\"id\" = source.\"id\"\n" +
+                "WHEN MATCHED THEN UPDATE SET target.\"a\"\"b\" = source.\"a\"\"b\", " +
+                "target.\"a\"\"\"\"b\" = source.\"a\"\"\"\"b\"\n" +
+                "WHEN NOT MATCHED THEN INSERT (\"id\", \"a\"\"b\", \"a\"\"\"\"b\") VALUES " +
+                "(source.\"id\", source.\"a\"\"b\", source.\"a\"\"\"\"b\")");
+
+            var row = Assert.Single(await ReadTwoQuotedColumnsAsync(location));
+            Assert.Equal("ONE-NEW", row.First);
+            Assert.Equal("TWO", row.Second);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>Two columns whose names differ only by one level of quote doubling — the shape that
+    /// makes a mis-resolved identifier land on a real column instead of failing loudly.</summary>
+    private static readonly Schema QuotedNameSchema = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("a\"b").DataType(Apache.Arrow.Types.StringType.Default).Nullable(false))
+        .Field(f => f.Name("a\"\"b").DataType(Apache.Arrow.Types.StringType.Default).Nullable(false))
+        .Build();
+
+    private static RecordBatch QuotedNameRow(string first, string second)
+    {
+        var id = new Int64Array.Builder();
+        var a = new StringArray.Builder();
+        var b = new StringArray.Builder();
+        id.Append(0);
+        a.Append(first);
+        b.Append(second);
+        return new RecordBatch(QuotedNameSchema, [id.Build(), a.Build(), b.Build()], 1);
+    }
+
+    private static Task<string> CreateTwoQuotedColumnsAsync(string dir, string[] partitionBy) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            var location = Path.Combine(dir, "quoted");
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.CreateTableAsync(
+                new TableCreateOptions(location, QuotedNameSchema)
+                { PartitionBy = partitionBy, SaveMode = SaveMode.ErrorIfExists },
+                default);
+            await table.InsertAsync(
+                [QuotedNameRow("ONE", "TWO")], QuotedNameSchema,
+                new InsertOptions { SaveMode = SaveMode.Append }, default);
+            return location;
+        });
+
+    private static Task MergeQuotedAsync(string location, string sql) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            await table.MergeAsync(sql, [QuotedNameRow("ONE-NEW", "TWO-NEW")], QuotedNameSchema, default);
+            return 0;
+        });
+
+    private static Task<IReadOnlyList<(long Id, string First, string Second)>> ReadTwoQuotedColumnsAsync(
+        string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            var rows = new List<(long, string, string)>();
+            // Positional, not by name: naming the columns in this query would need the very quoting
+            // this test exists to show is unsafe.
+            var query = new SelectQuery("select * from tbl") { TableAlias = "tbl" };
+            await foreach (var batch in table.QueryAsync(query, default))
+            {
+                using (batch)
+                {
+                    var byName = batch.Schema.FieldsList.Select((f, i) => (f.Name, i))
+                        .ToDictionary(x => x.Name, x => x.i, StringComparer.Ordinal);
+                    var id = (Int64Array)batch.Column(byName["id"]);
+                    for (var i = 0; i < batch.Length; i++)
+                    {
+                        rows.Add((
+                            id.GetValue(i) ?? 0,
+                            DeltaReader.Text(batch.Column(byName["a\"b"]), i),
+                            DeltaReader.Text(batch.Column(byName["a\"\"b"]), i)));
+                    }
+                }
+            }
+
+            return (IReadOnlyList<(long, string, string)>)rows;
+        });
+
+    private static Task MergeSourceAsync(string location, string sql, RecordBatch source) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            await table.MergeAsync(sql, [source], DeltaTestTable.Schema, default);
+            return 0;
+        });
+
     private static async Task AssertNarrowAsync(string sql)
     {
         var outcome = await MergeAsync(sql);
