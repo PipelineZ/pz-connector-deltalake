@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 using DeltaLake.Errors;
 using Pz.Connectors.Abstractions;
@@ -45,11 +46,36 @@ internal static class DeltaErrors
         WriteFailed, UnsupportedProtocol,
     ];
 
-    /// <summary>Markers that identify an optimistic-concurrency loss. delta-rs owns conflict detection;
-    /// this list only decides whether pz's retry policy gets a chance. Extend it when a real conflict
-    /// surfaces with wording not covered here — the concurrency test is what catches that.</summary>
+    /// <summary>Bare substrings that identify an optimistic-concurrency loss. "already exists" is
+    /// deliberately absent: delta-rs uses that exact phrase both for a version-conflict retry AND for
+    /// the permanent "A table already exists at: ..." create-time error (confirmed in the shipped
+    /// delta-rs binary), so it cannot be a bare substring marker without misclassifying the permanent
+    /// case as transient — see <see cref="VersionAlreadyExists"/>, which disambiguates the two.</summary>
     private static readonly string[] ConflictMarkers =
-        ["already exists", "concurrent", "conflict", "metadata changed", "version mismatch"];
+        ["concurrent", "conflict", "metadata changed", "version mismatch"];
+
+    /// <summary>Matches delta-rs's version-conflict wording ("version 7 already exists", "version
+    /// already exists") without matching the unrelated permanent create-time "table already exists"
+    /// error, which never mentions "version". Confirmed against literal strings shipped in
+    /// libdelta_rs_bridge.so: the conflict family ("version already exists, will retry", the kernel
+    /// VersionAlreadyExists error) always pairs "version" with "already exists"; the permanent family
+    /// ("A table already exists at: ", "Table already exists at path: ", "A Delta Lake table already
+    /// exists at that location.") never does.</summary>
+    private static readonly Regex VersionAlreadyExists = new(
+        @"(?i)version\b.{0,40}?already exists", RegexOptions.Compiled);
+
+    /// <summary>Bare substrings for storage-layer failures that are retryable on their own terms, not
+    /// because of an optimistic-concurrency loss. Each is a literal string confirmed shipped in
+    /// libdelta_rs_bridge.so: the network markers are Rust's own <c>std::io::ErrorKind</c> Display text
+    /// (bubbled up through delta-rs's IOError variant), and the throttling markers are the DynamoDB
+    /// lock client's literal AWS error text ("Provisioned table throughput exceeded",
+    /// "ThrottlingException", "RequestLimitExceeded").</summary>
+    private static readonly string[] TransientStorageMarkers =
+    [
+        "connection reset", "connection refused", "connection aborted", "network unreachable",
+        "network down", "broken pipe", "not connected", "timed out",
+        "throttl", "throughput exceeded", "requestlimitexceeded",
+    ];
 
     private const string DuplicateMergeMarker = "multiple source rows";
 
@@ -59,12 +85,15 @@ internal static class DeltaErrors
     /// rather than behind a word boundary, because object_store's option keys are env-var style
     /// (<c>AWS_SECRET_ACCESS_KEY</c>, <c>azure_storage_account_key</c>) — the sensitive word is a
     /// substring of the key, not the whole key, and <c>\b</c> does not fire mid-identifier across an
-    /// underscore. The captured group is the key name, kept in the replacement so the message still
-    /// says which field was redacted without saying what it held.</summary>
+    /// underscore. The bare <c>key</c> alternative is a deliberate catch-all: over-redaction is the
+    /// safe direction here, so any <c>*_key</c>-shaped option (present or future — e.g.
+    /// <c>azure_storage_sas_key</c>) is covered without having to enumerate every spelling. The
+    /// captured group is the key name, kept in the replacement so the message still says which field
+    /// was redacted without saying what it held.</summary>
     private static readonly Regex SecretShapedKeyValue = new(
-        @"(?i)\b([a-z0-9_]*(?:secret|password|passwd|access.?key|account.?key|client.?secret|" +
-        @"session.?token|sas.?token|connection.?string|credential|bearer|api.?key|sig(?:nature)?|" +
-        @"token)[a-z0-9_]*)\s*[=:]\s*(?:'[^']*'|""[^""]*""|\S+)",
+        @"(?i)\b([a-z0-9_]*(?:secret|password|passwd|client.?secret|session.?token|sas.?token|" +
+        @"connection.?string|credential|bearer|sig(?:nature)?|token|key)[a-z0-9_]*)\s*[=:]\s*" +
+        @"(?:'[^']*'|""[^""]*""|\S+)",
         RegexOptions.Compiled);
 
     /// <summary>Matches userinfo embedded in a URL (<c>scheme://user:pass@host</c>) — the shape a
@@ -90,6 +119,14 @@ internal static class DeltaErrors
             return already;
         }
 
+        // A cancelled run is not a delta failure. Rethrowing (rather than wrapping into a permanent
+        // PZDL0404) lets the engine's own cancellation handling see it instead of reporting a run that
+        // was stopped on purpose as a doomed one. ExceptionDispatchInfo preserves the original stack.
+        if (ex is OperationCanceledException)
+        {
+            ExceptionDispatchInfo.Capture(ex).Throw();
+        }
+
         var raw = Redact(ex.Message);
 
         if (raw.Contains(DuplicateMergeMarker, StringComparison.OrdinalIgnoreCase))
@@ -102,14 +139,28 @@ internal static class DeltaErrors
                 "each key appears once", ex);
         }
 
-        if (ConflictMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)))
+        if (ConflictMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)) ||
+            VersionAlreadyExists.IsMatch(raw))
         {
             return Transient(CommitConflict,
                 $"the delta {operation} lost a commit race against another writer ({raw})",
                 "no action needed if retries are configured; otherwise re-run", ex);
         }
 
-        return Fail(WriteFailed, $"the delta {operation} failed ({raw})",
+        if (TransientStorageMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Transient(CommitConflict,
+                $"the delta {operation} hit a transient storage error ({raw})",
+                "no action needed if retries are configured; otherwise re-run", ex);
+        }
+
+        // TableUnreadable (PZDL0201) exists specifically for the read path; an unrecognized write
+        // failure has nowhere else to land but WriteFailed (PZDL0404).
+        var fallbackCode = operation.Contains("read", StringComparison.OrdinalIgnoreCase)
+            ? TableUnreadable
+            : WriteFailed;
+
+        return Fail(fallbackCode, $"the delta {operation} failed ({raw})",
             "check the table's protocol version and the incoming schema; see docs/troubleshooting.md", ex);
     }
 

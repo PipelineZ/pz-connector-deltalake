@@ -86,6 +86,8 @@ public class DeltaErrorsTests
     [InlineData("put failed: AWS_SECRET_ACCESS_KEY=abcd1234efgh5678 rejected", "abcd1234efgh5678")]
     [InlineData("azure rejected azure_storage_account_key=Eby8vdM02xNOcqFbLTjXNsp4gYimSLGCK", "Eby8vdM02xNOcqFbLTjXNsp4gYimSLGCK")]
     [InlineData("bad options: AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE rejected", "AKIAIOSFODNN7EXAMPLE")]
+    [InlineData("generic error: azure_storage_sas_key=SECRETSASVALUE111 rejected", "SECRETSASVALUE111")]
+    [InlineData("generic error: sas_key=SECRETSASVALUE222 rejected", "SECRETSASVALUE222")]
     public void Translate_never_leaks_an_env_var_style_storage_option(string message, string secret)
     {
         var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "insert", []);
@@ -130,5 +132,62 @@ public class DeltaErrorsTests
             "sas token rejected: https://a.blob.core.windows.net/c/b?sv=2021&sig=AbCdEf123%3D&se=2026-01-01", 1);
         var ex = DeltaErrors.Translate(raw, "insert", []);
         Assert.DoesNotContain("AbCdEf123", ex.Message);
+    }
+
+    // delta-rs uses "already exists" both for a version-conflict retry AND for the permanent
+    // create-time "table already exists" error. An unanchored "already exists" marker would classify
+    // this permanent failure as a transient commit race, so pz would retry a doomed create and then
+    // report a misleading conflict message. Confirmed real delta-rs wording (from the shipped
+    // libdelta_rs_bridge.so): "A table already exists at: ", "Table already exists at path: ", and
+    // "A Delta Lake table already exists at that location." — none of them mention "version".
+    [Theory]
+    [InlineData("A table already exists at: s3://bucket/table")]
+    [InlineData("Table already exists at path: /data/table")]
+    [InlineData("A Delta Lake table already exists at that location.")]
+    public void Translate_classifies_a_table_already_exists_create_failure_as_permanent(string message)
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "create", []);
+        Assert.False(ex.IsTransient);
+    }
+
+    // Storage-layer failures that are retryable on their own terms (not an optimistic-concurrency
+    // loss) must still be offered to the engine's retry policy. Each message below is built from a
+    // literal string confirmed shipped in libdelta_rs_bridge.so: the network wording is Rust's own
+    // std::io::ErrorKind Display text, and the throttling wording is the DynamoDB lock client's literal
+    // AWS error text.
+    [Theory]
+    [InlineData("request failed: connection reset")]
+    [InlineData("request failed: connection refused")]
+    [InlineData("request failed: connection aborted")]
+    [InlineData("request failed: network unreachable")]
+    [InlineData("request failed: broken pipe")]
+    [InlineData("request failed: timed out")]
+    [InlineData("DynamoDb error: ThrottlingException")]
+    [InlineData("DynamoDb error: Provisioned table throughput exceeded")]
+    public void Translate_classifies_a_storage_layer_transient_failure_as_transient(string message)
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "commit", []);
+        Assert.True(ex.IsTransient);
+    }
+
+    // TableUnreadable (PZDL0201) exists specifically for the read path; before this fix, every
+    // unrecognized failure — including read failures — fell through to WriteFailed (PZDL0404).
+    [Fact]
+    public void Translate_classifies_an_unrecognized_read_failure_as_table_unreadable()
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException("some opaque delta-rs read error", 1), "read", []);
+        Assert.Contains(DeltaErrors.TableUnreadable, ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    // A cancelled run is not a delta failure. Wrapping it into a permanent PZDL0404 would report a run
+    // stopped on purpose as a doomed one, and would hide cancellation from the engine's own handling
+    // for it. Translate must let it propagate as cancellation instead of swallowing it into a result.
+    [Fact]
+    public void Translate_rethrows_cancellation_instead_of_wrapping_it()
+    {
+        var cancelled = new OperationCanceledException("the operation was canceled");
+        var thrown = Assert.Throws<OperationCanceledException>(() => DeltaErrors.Translate(cancelled, "insert", []));
+        Assert.Same(cancelled, thrown);
     }
 }
