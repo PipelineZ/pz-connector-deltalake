@@ -54,6 +54,21 @@ public class DeltaSecretSqlTests
     }
 
     [Fact]
+    public void A_scheme_prefixed_endpoint_is_stripped_because_DuckDBs_ENDPOINT_secret_parameter_takes_a_bare_host()
+    {
+        // A user's 'endpoint:' value is one string DeltaStorageOptions.Build also consumes, the other
+        // direction: object_store needs a scheme, DuckDB's ENDPOINT secret parameter must not have one
+        // (confirmed against a real DuckDB 1.5.5). Both engines must agree on what the same value means.
+        var sql = SoleSecret(DeltaSecretSql.SetupStatements(
+            Cfg(("root", "s3://w/d"), ("access_key_id", "AK"), ("secret_access_key", "SK"),
+                ("endpoint", "http://localhost:9000")),
+            "lake"));
+
+        Assert.Contains("endpoint 'localhost:9000'", sql);
+        Assert.DoesNotContain("http://", sql);
+    }
+
+    [Fact]
     public void Use_ssl_false_is_rendered_literally_not_dropped()
     {
         var stmts = DeltaSecretSql.SetupStatements(

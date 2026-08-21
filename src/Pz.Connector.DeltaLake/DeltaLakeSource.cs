@@ -135,7 +135,13 @@ internal sealed class DeltaLakeSource(ConnectorConfig config) : ISource
             return null;
         }
 
-        if (!long.TryParse(version, NumberStyles.Integer, CultureInfo.InvariantCulture, out var versionNumber))
+        // versionNumber < 0 is rejected here, not left for delta-rs to reject: TableOptions.Version is
+        // ulong, so an unchecked negative would wrap into a huge, meaningless version number at the FFI
+        // boundary (DeltaStorageOptions.LoadAsync), and DuckDB's delta_scan would receive a literal
+        // "version => -1" it has no sensible reading for either. Rejecting it here, where the message
+        // already promises "non-negative", makes both consumers provably never see one.
+        if (!long.TryParse(version, NumberStyles.Integer, CultureInfo.InvariantCulture, out var versionNumber) ||
+            versionNumber < 0)
         {
             throw DeltaErrors.Fail(DeltaErrors.VersionNotFound,
                 $"dataset '{spec.Dataset}': 'version' value '{version}' is not a valid delta table version",

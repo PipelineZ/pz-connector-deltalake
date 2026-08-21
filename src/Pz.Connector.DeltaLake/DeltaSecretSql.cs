@@ -101,7 +101,7 @@ internal static class DeltaSecretSql
 
         Add(parts, "session_token", sessionToken);
         Add(parts, "region", region);
-        Add(parts, "endpoint", endpoint);
+        Add(parts, "endpoint", StripScheme(endpoint));
         Add(parts, "url_style", urlStyle);
         if (hasUseSsl)
         {
@@ -174,6 +174,24 @@ internal static class DeltaSecretSql
         {
             parts.Add($"{key} {Literal(value)}");
         }
+    }
+
+    // DuckDB's S3 secret ENDPOINT is a bare host[:port] -- confirmed against a real DuckDB 1.5.5, which
+    // rejects a scheme-prefixed value with "Invalid Input Error: URL needs to start with http:// or
+    // https://" thrown from the WRONG place (it means the opposite: giving it one is the error). TLS is
+    // controlled separately by the use_ssl parameter. delta-rs's AWS_ENDPOINT_URL storage option is the
+    // mirror image -- it requires a full URL. A user's 'endpoint:' value is one string shared by both
+    // translations (DeltaStorageOptions.Build normalizes the same value the other way), so this side
+    // strips a scheme rather than assuming the user already wrote a bare host.
+    private static string? StripScheme(string? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var schemeEnd = value.IndexOf("://", StringComparison.Ordinal);
+        return schemeEnd < 0 ? value : value[(schemeEnd + 3)..];
     }
 
     // Single-quote doubling: the one escaping rule that keeps a credential from ending its own literal.

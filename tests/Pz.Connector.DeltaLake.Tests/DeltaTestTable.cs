@@ -46,6 +46,33 @@ internal static class DeltaTestTable
         return new RecordBatch(Schema, [id.Build(), dt.Build(), amt.Build()], rows.Count);
     }
 
+    // One column wider than Schema -- version-probe tests need a real schema DIFFERENCE across
+    // commits, not just a different version number, to prove GetSchemaAsync's 'version' option drives
+    // what comes back rather than always returning latest.
+    public static readonly Schema WiderSchema = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+        .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
+        .Field(f => f.Name("note").DataType(StringType.Default).Nullable(true))
+        .Build();
+
+    private static RecordBatch WiderRows(long count)
+    {
+        var id = new Int64Array.Builder();
+        var dt = new StringArray.Builder();
+        var amt = new DoubleArray.Builder();
+        var note = new StringArray.Builder();
+        for (var i = 0; i < count; i++)
+        {
+            id.Append(i);
+            dt.Append(Partition(i));
+            amt.Append(i);
+            note.Append($"n{i}");
+        }
+
+        return new RecordBatch(WiderSchema, [id.Build(), dt.Build(), amt.Build(), note.Build()], (int)count);
+    }
+
     // Every delta-rs call runs on DeltaBigStack's dedicated big-stack thread: delta-kernel-rs can
     // exhaust a default .NET thread stack on Unix and take the process down with it (see
     // DeltaBigStack's own doc comment) — a risk that applies just as much to a test helper calling
@@ -62,6 +89,24 @@ internal static class DeltaTestTable
             {
                 await table.InsertAsync([Rows(0, rows)], Schema, new InsertOptions { SaveMode = SaveMode.Append }, default);
             }
+
+            return location;
+        });
+
+    // Version 0 has the 3-column Schema; a second, schema-evolving overwrite commit makes version 1 a
+    // 4-column table -- the one fixture shape that lets a test prove 'version: 0' actually changes what
+    // GetSchemaAsync returns, rather than merely accepting the option without acting on it.
+    public static Task<string> CreateLocalWithSchemaEvolutionAsync(string dir, long rows) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            var location = Path.Combine(dir, "orders");
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.CreateTableAsync(
+                new TableCreateOptions(location, Schema) { SaveMode = SaveMode.ErrorIfExists }, default);
+            await table.InsertAsync([Rows(0, rows)], Schema, new InsertOptions { SaveMode = SaveMode.Append }, default);
+            await table.InsertAsync(
+                [WiderRows(rows)], WiderSchema,
+                new InsertOptions { SaveMode = SaveMode.Overwrite, OverwriteSchema = true }, default);
 
             return location;
         });
