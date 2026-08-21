@@ -151,12 +151,50 @@ public class MergeSafetyTests
         Assert.Null(outcome.SkipReason);
     }
 
-    [Fact]
-    public void Derived_literals_are_escaped_not_concatenated()
+    [Theory]
+    [InlineData("it's")]
+    [InlineData("O''Brien")]
+    [InlineData("''")]
+    [InlineData("back\\")]
+    [InlineData("C:\\path\\")]
+    [InlineData("a\\'b")]
+    [InlineData("'); drop table t --")]
+    public void A_value_carrying_a_quote_or_a_backslash_is_refused_not_escaped(string value)
     {
-        var batch = DeltaTestTable.RowsWithAmounts([(1, "it's", 1.0)]);
+        // Escaping was measured to be the thing that goes wrong, not the thing that was passed over.
+        // A value carrying '' merges as though it carried one quote, so the IN list names a partition
+        // the table does not have and the row is inserted a second time with no error;  a value
+        // carrying \' fails the whole write with an unterminated-literal parser error. Both are
+        // demonstrated against real delta-rs in MergeSafetyExecutionTests. The rule refuses any quote
+        // or backslash rather than the two shapes one build of one parser mishandles, because the
+        // narrow rule readmits the duplicate the moment that parser's unescaping shifts.
+        var batch = DeltaTestTable.RowsWithAmounts([(1, value, 1d)]);
         var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]));
-        Assert.Equal(["'it''s'"], outcome.Filters!.Single().Literals);
+
+        Assert.Null(outcome.Filters);
+        Assert.Contains("quote or a backslash", outcome.SkipReason!);
+        Assert.DoesNotContain(value, outcome.SkipReason!);
+    }
+
+    [Fact]
+    public void Every_string_literal_is_two_quotes_with_nothing_quote_shaped_between_them()
+    {
+        // The whole contract this file owes the statement generator, checked as a shape rather than
+        // value by value: after the refusal above there is nothing left for an escape to express, so
+        // a literal that needed one is a literal that should never have been built.
+        var batch = DeltaTestTable.RowsWithAmounts(
+            [.. HostilePartitionValues.Select((v, i) => ((long)i, v, 1d))]);
+        var literals = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]))
+            .Filters!.Single().Literals;
+
+        Assert.Equal(HostilePartitionValues.Length, literals.Count);
+        foreach (var literal in literals)
+        {
+            Assert.StartsWith("'", literal, StringComparison.Ordinal);
+            Assert.EndsWith("'", literal, StringComparison.Ordinal);
+            Assert.DoesNotContain("'", literal[1..^1], StringComparison.Ordinal);
+            Assert.DoesNotContain("\\", literal[1..^1], StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -231,11 +269,11 @@ public class MergeSafetyTests
         var id = new Int64Array.Builder();
         var dt = new StringViewArray.Builder();
         id.Append(1);
-        dt.Append("it's");
+        dt.Append("a)b");
         var batch = new RecordBatch(schema, [id.Build(), dt.Build()], 1);
 
         var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]));
-        Assert.Equal(["'it''s'"], outcome.Filters!.Single().Literals);
+        Assert.Equal(["'a)b'"], outcome.Filters!.Single().Literals);
     }
 
     [Fact]
@@ -349,13 +387,157 @@ public class MergeSafetyTests
         Assert.Contains("'dt'", outcome.SkipReason!);
     }
 
-    /// <summary>Partition values whose text is a fragment of SQL. None of them needs a hostile author:
-    /// a tenant name, a product code or a path can contain any of these, and the value reaches the
-    /// generated statement from DATA rather than from configuration.</summary>
+    [Fact]
+    public void A_key_that_merely_contains_the_partition_columns_name_does_not_cover_it()
+    {
+        // Membership, not containment. 'dtx' is a different column from 'dt', so a key list holding it
+        // leaves 'dt' outside keys and the derivation unsound — the one near-miss shape on the safety
+        // rule that a substring test would let through.
+        var outcome = DeltaPartitionPredicate.Derive([DeltaTestTable.Rows(0, 4)], Opts(["id", "dtx"], ["dt"]));
+        Assert.Null(outcome.Filters);
+        Assert.Contains("keys", outcome.SkipReason!);
+    }
+
+    [Fact]
+    public void Partition_values_differing_only_in_case_stay_two_literals()
+    {
+        // Pooling them case-insensitively would name one partition and hide the other, and the merge
+        // would insert a second copy of every row in the hidden one.
+        var batch = DeltaTestTable.RowsWithAmounts([(1, "EU", 1), (2, "eu", 2)]);
+        var literals = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]))
+            .Filters!.Single().Literals;
+        Assert.Equal(["'EU'", "'eu'"], literals);
+    }
+
+    [Fact]
+    public void A_partition_value_keeps_the_whitespace_it_arrived_with()
+    {
+        // A Delta partition value is the bytes it was written with, so normalising one here would name
+        // a partition the table does not have. Very reachable: a CSV or TSV extract pads freely.
+        var batch = DeltaTestTable.RowsWithAmounts([(1, " x ", 1)]);
+        Assert.Equal(["' x '"], DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]))
+            .Filters!.Single().Literals);
+    }
+
+    [Fact]
+    public void A_refusal_on_a_later_partition_column_carries_no_filters_at_all()
+    {
+        // 'yr' renders and 'blob' does not. The outcome must be a refusal and nothing else: an outcome
+        // carrying BOTH a filter and a reason is one a consumer can half-read, and the type says one
+        // or the other. The filters for 'yr' would even be sound on their own — that is exactly why
+        // nothing but a test stops them leaking out beside the reason.
+        var schema = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("yr").DataType(Int32Type.Default).Nullable(false))
+            .Field(f => f.Name("blob").DataType(BinaryType.Default).Nullable(false))
+            .Build();
+        var id = new Int64Array.Builder();
+        var yr = new Int32Array.Builder();
+        var blob = new BinaryArray.Builder();
+        id.Append(1);
+        yr.Append(2026);
+        blob.Append([1, 2, 3]);
+        var batch = new RecordBatch(schema, [id.Build(), yr.Build(), blob.Build()], 1);
+
+        var outcome = DeltaPartitionPredicate.Derive(
+            [batch], Opts(["id", "yr", "blob"], ["yr", "blob"]));
+
+        Assert.Null(outcome.Filters);
+        Assert.NotNull(outcome.SkipReason);
+    }
+
+    [Theory]
+    [InlineData(3_000_000)]
+    [InlineData(int.MaxValue)]
+    [InlineData(int.MinValue)]
+    public void A_date_beyond_the_calendar_blocks_the_derivation_rather_than_throwing(int days)
+    {
+        // Arrow DATE is an int32 day count and reaches far past what .NET's DateTime can express;
+        // pz's own hub deals in dates past 9999. Derive runs on the buffered batch BEFORE the merge,
+        // so an exception escaping it would abort a write that would otherwise have succeeded — this
+        // file's contract is that a value it cannot handle costs speed, never the write.
+        var days32 = new ArrowBuffer.Builder<int>();
+        days32.Append(days);
+        var batch = new RecordBatch(
+            DateSchema(Date32Type.Default),
+            [Ids(1), new Date32Array(new ArrayData(Date32Type.Default, 1, 0, 0, [ArrowBuffer.Empty, days32.Build()]))],
+            1);
+
+        var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "d"], ["d"]));
+        Assert.Null(outcome.Filters);
+        Assert.Contains("date", outcome.SkipReason!);
+    }
+
+    [Fact]
+    public void A_date64_beyond_the_calendar_blocks_the_derivation_rather_than_throwing()
+    {
+        var ms = new ArrowBuffer.Builder<long>();
+        ms.Append(long.MaxValue);
+        var batch = new RecordBatch(
+            DateSchema(Date64Type.Default),
+            [Ids(1), new Date64Array(new ArrayData(Date64Type.Default, 1, 0, 0, [ArrowBuffer.Empty, ms.Build()]))],
+            1);
+
+        var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "d"], ["d"]));
+        Assert.Null(outcome.Filters);
+        Assert.Contains("date", outcome.SkipReason!);
+    }
+
+    [Fact]
+    public void A_dictionary_encoded_partition_column_blocks_the_derivation()
+    {
+        // Which string encoding arrives is a property of the plan that produced the batch, so a
+        // dictionary-encoded low-cardinality column is a plausible arrival — but this one is refused
+        // on a fact about the write, not about rendering: measured, delta-rs cannot write a
+        // dictionary-encoded PARTITION column at all ("Error partitioning record batch: Missing
+        // partition column"), so a literal derived from one would narrow a merge that is already
+        // doomed. A dictionary-encoded ORDINARY column writes fine and is never read here.
+        var dictionary = new DictionaryType(Int32Type.Default, StringType.Default, false);
+        var schema = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(dictionary).Nullable(false))
+            .Build();
+        var values = new StringArray.Builder();
+        values.Append("p0");
+        var indices = new Int32Array.Builder();
+        indices.Append(0);
+        var batch = new RecordBatch(
+            schema, [Ids(1), new DictionaryArray(dictionary, indices.Build(), values.Build())], 1);
+
+        var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]));
+        Assert.Null(outcome.Filters);
+        Assert.Contains("dictionary", outcome.SkipReason!);
+    }
+
+    private static Schema DateSchema(IArrowType type) =>
+        new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("d").DataType(type).Nullable(false))
+            .Build();
+
+    private static IArrowArray Ids(int count)
+    {
+        var id = new Int64Array.Builder();
+        for (var i = 0; i < count; i++)
+        {
+            id.Append(i);
+        }
+
+        return id.Build();
+    }
+
+    /// <summary>Partition values whose text is a fragment of SQL, and which this connector still
+    /// renders. None of them needs a hostile author: a tenant name, a product code or a path can
+    /// contain any of these, and the value reaches the generated statement from DATA rather than from
+    /// configuration. Two of them look redundant and are not: 'EU'/'eu' differ only in case, and a
+    /// deriver that pooled them case-insensitively would name one partition and hide the other, and
+    /// ' padded ' would name a partition that does not exist if the value were ever trimmed. Both are
+    /// silent duplicates, so both are here and both are merged for real next door.</summary>
     internal static readonly string[] HostilePartitionValues =
     [
-        "it's", "a)b", "$$x$$", "back\\", "trailing\\\\", "semi;--x", "'); drop table t --",
-        "a, 'b", "line\nbreak", "nul\0byte", "plain",
+        "a)b", "((", "))", "$$x$$", "$tag$y$tag$", "a`b", "/*c*/", "semi;--x", "a, b",
+        "line\nbreak", "cr\rreturn", "tab\there", "nul\0byte", "caf\u00e9", " padded ",
+        "EU", "eu", "plain",
     ];
 
     private static List<(long, string, double)> DistinctPartitions(int count) =>

@@ -71,16 +71,21 @@ public class MergeSafetyExecutionTests
         }
     }
 
-    [Fact]
-    public async Task The_assertion_has_teeth_because_a_filter_missing_one_partition_duplicates_its_rows()
+    [Theory]
+    [InlineData(" padded ")]
+    [InlineData("EU")]
+    public async Task The_assertion_has_teeth_because_a_filter_missing_one_partition_duplicates_its_rows(
+        string missing)
     {
         // The same write with one value struck out of the derived list. Without this, "every row was
         // updated" could be passing because the IN list never reaches the target scan at all — in which
         // case the test above would prove nothing about pruning, and a genuinely unsound predicate
-        // would sail through it. The row that goes missing here is the trailing-backslash one, so this
-        // also proves that literal is doing real work rather than being ignored.
+        // would sail through it.
+        //
+        // The two values struck out are the two a plausible edit would lose: a deriver that trimmed
+        // whitespace would stop naming ' padded ', and one that pooled values case-insensitively would
+        // stop naming 'EU' beside 'eu'. Both are silent duplicates, and this is what one looks like.
         var values = MergeSafetyTests.HostilePartitionValues;
-        var missing = "back\\";
         var target = values.Select((v, i) => ((long)i, v, (double)i)).ToList();
         var source = values.Select((v, i) => ((long)i, v, 1000d + i)).ToList();
 
@@ -110,6 +115,92 @@ public class MergeSafetyExecutionTests
             Directory.Delete(dir, true);
         }
     }
+
+    [Theory]
+    [InlineData("O''Brien")]
+    [InlineData("''")]
+    [InlineData("a''b")]
+    public async Task A_value_carrying_a_doubled_quote_is_refused_because_escaping_it_duplicates_the_row(
+        string value)
+    {
+        // Why the refusal is not caution. The literal below is what escaping produces — the value with
+        // every quote doubled, which is what this dialect's own rule says an escape is. Merged with no
+        // partition predicate the row MATCHES and is updated; merged with that literal in the IN list
+        // the same row is invisible to the target scan and a second copy of the same key is inserted,
+        // with no error anywhere. Same table, same data, only the filter differs.
+        //
+        // The statement is built by hand because both ends of this connector now refuse the literal —
+        // which is the point: the two sides agree, and this is the measurement they agree about.
+        var escaped = "'" + value.Replace("'", "''") + "'";
+
+        Assert.Null(DeltaPartitionPredicate.Derive(
+            [DeltaTestTable.RowsWithAmounts([(0L, value, 1d)])], Opts(["id", "dt"], ["dt"])).Filters);
+
+        var dir = Directory.CreateTempSubdirectory("pz-delta-partition-exec").FullName;
+        try
+        {
+            var source = DeltaTestTable.RowsWithAmounts([(0L, value, 42d)]);
+
+            var control = await CreatePartitionedAsync(dir, [(0L, value, 0d)], "control");
+            await MergeAsync(control, Merge("target.\"id\" = source.\"id\""), source);
+            var matched = Assert.Single(await DeltaReader.RowsAsync(control));
+            Assert.Equal(42d, matched.Amt);
+
+            var filtered = await CreatePartitionedAsync(dir, [(0L, value, 0d)], "filtered");
+            await MergeAsync(
+                filtered,
+                Merge($"target.\"id\" = source.\"id\" AND target.\"dt\" IN ({escaped})"),
+                DeltaTestTable.RowsWithAmounts([(0L, value, 42d)]));
+
+            var after = await DeltaReader.RowsAsync(filtered);
+            Assert.Equal(2, after.Count);
+            Assert.Equal(2, after.Count(r => r.Id == 0));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("a\\'b")]
+    [InlineData("lead\\'x")]
+    public async Task A_value_carrying_a_backslash_before_a_quote_is_refused_because_escaping_it_fails_the_write(
+        string value)
+    {
+        // The louder half of the same measurement. Escaping this value produces a literal the parser
+        // cannot terminate, and the failure is an uncoded one that takes the whole write with it — in
+        // a file whose contract is that a value it cannot handle costs speed, never the write.
+        var escaped = "'" + value.Replace("'", "''") + "'";
+
+        Assert.Null(DeltaPartitionPredicate.Derive(
+            [DeltaTestTable.RowsWithAmounts([(0L, value, 1d)])], Opts(["id", "dt"], ["dt"])).Filters);
+
+        var dir = Directory.CreateTempSubdirectory("pz-delta-partition-exec").FullName;
+        try
+        {
+            var location = await CreatePartitionedAsync(dir, [(0L, value, 0d)]);
+            var failure = await Assert.ThrowsAnyAsync<Exception>(() => MergeAsync(
+                location,
+                Merge($"target.\"id\" = source.\"id\" AND target.\"dt\" IN ({escaped})"),
+                DeltaTestTable.RowsWithAmounts([(0L, value, 42d)])));
+
+            Assert.Contains("Unterminated string literal", failure.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>The statement shape <see cref="DeltaMergeSql.Build"/> produces for this fixture, with
+    /// the ON clause supplied by hand — the two tests above need an ON clause the generator now
+    /// refuses to build, which is exactly what they are demonstrating.</summary>
+    private static string Merge(string on) =>
+        $"MERGE INTO target USING source ON {on}\n" +
+        "WHEN MATCHED THEN UPDATE SET target.\"dt\" = source.\"dt\", target.\"amt\" = source.\"amt\"\n" +
+        "WHEN NOT MATCHED THEN INSERT (\"id\", \"dt\", \"amt\") VALUES " +
+        "(source.\"id\", source.\"dt\", source.\"amt\")";
 
     [Fact]
     public async Task A_partition_column_outside_keys_is_refused_because_deriving_it_would_duplicate_a_row()

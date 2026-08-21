@@ -27,9 +27,11 @@ internal sealed record DerivationOutcome(IReadOnlyList<PartitionFilter>? Filters
 /// concatenated into SQL by <see cref="DeltaMergeSql"/>, which is the last place that could catch a
 /// malformed one and has no way to know a value's type or provenance; the check it applies there is
 /// defence in depth, not the guarantee. The guarantee is here: every literal is one complete,
-/// self-contained SQL literal for the column's own Arrow type — a bare decimal token or a
-/// '\''-quoted string with every embedded quote doubled — built from the incoming batch's own values
-/// and never from configuration or free text.</summary>
+/// self-contained SQL literal for the column's own Arrow type — a bare decimal token, or a quoted
+/// string that is exactly two quote characters with the value between them and NO quote or backslash
+/// inside — built from the incoming batch's own values and never from configuration or free text.
+/// A value that cannot meet that shape is refused rather than escaped; <see cref="Render"/> records
+/// what escaping was measured to do instead.</summary>
 internal static class DeltaPartitionPredicate
 {
     /// <summary>Beyond this many distinct values an IN list costs more to parse and plan than the
@@ -89,12 +91,12 @@ internal static class DeltaPartitionPredicate
                             "rows it has to find. Set 'merge_predicate' to narrow the merge explicitly");
                     }
 
-                    if (Literal(array, row) is not { } literal)
+                    var rendered = Render(array, row);
+                    if (rendered.Literal is not { } literal)
                     {
                         return new DerivationOutcome(null,
-                            $"partition column '{column}' has type {array.Data.DataType.Name}, which this " +
-                            "connector does not render as a SQL literal. Set 'merge_predicate' to narrow the " +
-                            "merge explicitly");
+                            $"partition column '{column}' {rendered.Because}. Set 'merge_predicate' to " +
+                            "narrow the merge explicitly");
                     }
 
                     literals.Add(literal);
@@ -122,13 +124,19 @@ internal static class DeltaPartitionPredicate
         return new DerivationOutcome(filters, null);
     }
 
-    /// <summary>One complete SQL literal for the value at <paramref name="row"/>, or null for any type
-    /// this connector will not render — guessing a literal form for an unfamiliar type is how a
-    /// predicate silently stops matching, and skipping the derivation only costs speed.
+    /// <summary>One literal, or the reason there is none — the reason completes the sentence
+    /// "partition column 'x' …". The two refusals are kept apart because they send a reader to
+    /// different places: an unrenderable TYPE is a property of the column and refuses every row of it,
+    /// while an unrenderable VALUE says nothing about the column's type and may refuse one row out of
+    /// millions. Neither ever carries the value itself.</summary>
+    private readonly record struct Rendered(string? Literal, string? Because);
+
+    /// <summary>Renders one value, or refuses it. Refusing costs speed and nothing else, which is why
+    /// every branch below refuses rather than approximates.
     ///
-    /// Every form below was measured end to end against the shipped delta-rs: a table partitioned on a
-    /// column of that type, merged with the literal this method produces, matches its existing row
-    /// rather than inserting a second copy. Three deliberate absences:
+    /// Every form this produces was measured end to end against the shipped delta-rs: a table
+    /// partitioned on a column of that type, merged with the literal produced here, matches its
+    /// existing row rather than inserting a second copy. Four deliberate absences:
     /// <list type="bullet">
     /// <item><description>BOOLEAN. Measured: DataFusion accepts IN (true) and refuses IN ('true') with
     /// "Cannot infer common argument type for comparison operation Boolean = Utf8". The one form that
@@ -136,41 +144,112 @@ internal static class DeltaPartitionPredicate
     /// generator accepts from this method, and emitting it would turn a merge into a hard failure. A
     /// boolean column has at most two partitions, so the pruning forgone is at most half a scan.</description></item>
     /// <item><description>FLOAT/DOUBLE. Equality against a value that round-trips through a decimal
-    /// rendering and a directory name is exactly the silent non-match this method exists to avoid.</description></item>
-    /// <item><description>TIMESTAMP. Its rendering depends on unit and time zone, so a single format
-    /// string here would be a guess about the value, not about the type.</description></item>
-    /// <item><description>Both of the last two were observed to match for one convenient value, which
-    /// is not the same as being right for every value — the difference is the whole reason they are
-    /// absent, so an observation of one value is not grounds to add them.</description></item>
+    /// rendering and a directory name is exactly the silent non-match this method exists to avoid, and
+    /// it is not hypothetical: -0.0 renders as "-0", names a partition the table does not have, and
+    /// duplicates the row.</description></item>
+    /// <item><description>TIMESTAMP. Its rendering depends on unit and time zone, and the obvious
+    /// ISO-8601 form silently truncates sub-second precision and duplicates. One format string here
+    /// would be a guess about the value, not about the type.</description></item>
+    /// <item><description>DICTIONARY-encoded columns. Not a rendering question at all: measured, a
+    /// dictionary-encoded PARTITION column cannot be written to a Delta table by this library in the
+    /// first place ("Error partitioning record batch: Missing partition column"), so a literal derived
+    /// from one would narrow a merge that is already doomed. A dictionary-encoded ordinary column
+    /// writes fine, and is never read here.</description></item>
     /// </list></summary>
-    private static string? Literal(IArrowArray array, int row) => array switch
+    private static Rendered Render(IArrowArray array, int row)
     {
-        // The same logical type arrives in any of three encodings depending on the plan that produced
-        // the batch, not on the column's Delta type; the literal is identical for all three.
-        StringArray a => Quote(a.GetString(row)),
-        StringViewArray a => Quote(a.GetString(row)),
-        LargeStringArray a => Quote(a.GetString(row)),
+        if (Text(array, row) is { } text)
+        {
+            // A quote or a backslash in a partition value is refused, never escaped. Measured against
+            // the shipped library: a value carrying '' merges as though it carried one quote, so the
+            // IN list names a partition the table does not have, the target row stays invisible to the
+            // scan, and the merge inserts a second copy of a key it should have matched — silently.
+            // A value carrying \' fails the whole write with an unterminated-literal parser error.
+            // The narrower rule that admits it's and back\ is a list of the shapes one build of one
+            // parser mishandles, and it readmits the duplicate the moment that parser's unescaping
+            // shifts; refusing both characters outright cannot fail that way. The cost is no pruning
+            // on a value carrying either character, which costs speed and never a row.
+            return text.AsSpan().IndexOfAny('\'', '\\') >= 0
+                ? new Rendered(null,
+                    "holds a value this connector does not render as a SQL literal: a partition value " +
+                    "carrying a quote or a backslash is refused rather than escaped, because how a SQL " +
+                    "engine unescapes one is not something this connector can depend on")
+                : new Rendered(Quote(text), null);
+        }
+
+        if (array is Date32Array or Date64Array)
+        {
+            return Day(array, row) is { } day
+                ? new Rendered(Quote(day), null)
+                : new Rendered(null,
+                    "holds a date outside the range this connector renders as a SQL literal");
+        }
+
+        return Number(array, row) is { } number
+            ? new Rendered(number, null)
+            : new Rendered(null,
+                $"has type {array.Data.DataType.Name}, which this connector does not render as a SQL " +
+                "literal");
+    }
+
+    /// <summary>The value as text when the column is one of the string encodings, null for every other
+    /// type. One extractor rather than a branch per encoding at each use, so nothing can disagree about
+    /// which arrays are strings. The same logical type arrives in any of these encodings depending on
+    /// the plan that produced the batch, not on the column's Delta type.</summary>
+    private static string? Text(IArrowArray array, int row) => array switch
+    {
+        StringArray a => a.GetString(row),
+        StringViewArray a => a.GetString(row),
+        LargeStringArray a => a.GetString(row),
+        _ => null,
+    };
+
+    /// <summary>A bare decimal token, or null for anything that is not an integer column. Delta has no
+    /// unsigned types: delta-rs casts an unsigned column to Int64 on the way in and fails the write
+    /// outright on a value that does not fit ("Can't cast value ... to type Int64"), so a bare decimal
+    /// token is always in range for any value that can reach a partition.</summary>
+    private static string? Number(IArrowArray array, int row) => array switch
+    {
         Int8Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         Int16Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         Int32Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         Int64Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
-        // Delta has no unsigned types: delta-rs casts an unsigned column to Int64 on the way in and
-        // fails the write outright on a value that does not fit ("Can't cast value ... to type Int64"),
-        // so a bare decimal token is always in range for any value that can reach a partition.
         UInt8Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         UInt16Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         UInt32Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
         UInt64Array a => a.GetValue(row)!.Value.ToString(CultureInfo.InvariantCulture),
-        Date32Array a => Quote(a.GetDateTime(row)!.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)),
-        Date64Array a => Quote(a.GetDateTime(row)!.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)),
         _ => null,
     };
 
-    /// <summary>Doubling the quote is the whole escape: this SQL dialect applies no backslash escaping
-    /// inside an unprefixed '...' literal, measured against the shipped parser rather than assumed —
-    /// a value ending in a backslash is merged and matched by MergeSafetyExecutionTests. If that ever
-    /// changed, "a\" would escape its own closing quote and the literal would swallow the SQL after it,
-    /// which is why the value that reaches a merge from DATA, where nobody has to be malicious for it
-    /// to be hostile, is pinned by an execution test rather than by this comment.</summary>
-    private static string Quote(string value) => $"'{value.Replace("'", "''")}'";
+    /// <summary>The calendar date, or null when the day count is outside what .NET can express. Arrow
+    /// DATE is an int32 day count that reaches far past DateTime's year 9999 — measured: 3_000_000,
+    /// int.MaxValue and int.MinValue all raise ArgumentOutOfRangeException out of GetDateTime — and pz's
+    /// own hub supports dates past 9999, so the conversion is guarded rather than trusted. Derive runs
+    /// on the buffered batch BEFORE the merge, so an exception escaping here would abort a write that
+    /// would otherwise have succeeded: this file's contract is that a value it cannot handle costs
+    /// speed, never the write.</summary>
+    private static string? Day(IArrowArray array, int row)
+    {
+        try
+        {
+            var value = array switch
+            {
+                Date32Array a => a.GetDateTime(row),
+                Date64Array a => a.GetDateTime(row),
+                _ => (DateTime?)null,
+            };
+
+            return value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Wraps a value that has already been refused if it contained a quote or a backslash, so
+    /// there is nothing left to escape: the literal is exactly two quotes with the value between them.
+    /// Escaping is not the alternative that was passed over here — it was measured to be the thing that
+    /// goes wrong. See <see cref="Render"/>.</summary>
+    private static string Quote(string value) => $"'{value}'";
 }
