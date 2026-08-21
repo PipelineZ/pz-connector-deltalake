@@ -14,6 +14,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="golden\*.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Pz.Connectors.TestKit" Version="0.2.2" />
     <!-- Test-only: reproduces pz's own ConnectorConfigValidator.ValidateSchema evaluation
          (JsonSchema.Net 9.2.2, the exact version Pz.Engine pins) against the shipped
