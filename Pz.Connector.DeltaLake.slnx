@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj" />
+  <Project Path="tests/Pz.Connector.DeltaLake.Tests/Pz.Connector.DeltaLake.Tests.csproj" />
+</Solution>

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>Pz.Connector.DeltaLake</PackageId>
+    <Description>Delta Lake source and sink connector for PipelineZ (pz). Reads via DuckDB's delta extension, writes append/replace/merge via delta-rs.</Description>
+    <PackageTags>pipelinez;pipelinez-connector;pz;delta-lake;deltalake;lakehouse;etl;duckdb;arrow</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.2.2" />
+    <PackageReference Include="DeltaLake.Net" Version="0.33.0" />
+    <PackageReference Include="Apache.Arrow" Version="23.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The manifest ships at the nupkg root AND next to the assembly: the first is what the host
+         reads to gate protocol compatibility, the second is what lets tests load this build output
+         as if it were a materialized package. -->
+    <None Include="pz.connector.json" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pz.Connector.DeltaLake.Tests" />
+  </ItemGroup>
+
+</Project>
