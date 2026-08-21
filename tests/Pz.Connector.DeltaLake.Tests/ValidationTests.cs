@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Json.Schema;
 using Pz.Connectors.Abstractions;
 using Xunit;
 
@@ -124,4 +126,31 @@ public class ValidationTests
     [InlineData("orders")]
     public void An_ordinary_read_path_is_not_mistaken_for_a_template(string path) =>
         Assert.DoesNotMatch(DeltaLakeSchemas.CalendarTokenPattern, path);
+
+    // The two theory tests above exercise CalendarTokenPattern as a bare .NET Regex -- they would
+    // still pass even if the pattern's escaping came out wrong once embedded in the Dataset JSON
+    // string (a dropped "\\", say), because they never touch the JSON text at all. These two evaluate
+    // the SHIPPED DeltaLakeSchemas.Dataset constant through JsonSchema.Net using the exact call shape
+    // pz's own ConnectorConfigValidator.ValidateSchema uses (schema.Evaluate with
+    // OutputFormat.List), so a future edit that breaks the embedded pattern's escaping fails here
+    // even though the bare-regex tests above would keep passing.
+    [Theory]
+    [InlineData("data/{yyyy}/{MM}")]
+    [InlineData("orders_{yyyy-MM-dd}")]
+    public void The_shipped_dataset_schema_rejects_a_calendar_token_path_when_evaluated(string path) =>
+        Assert.False(EvaluateDatasetPath(path).IsValid);
+
+    [Theory]
+    [InlineData("curated/orders")]
+    [InlineData("orders")]
+    public void The_shipped_dataset_schema_accepts_an_ordinary_path_when_evaluated(string path) =>
+        Assert.True(EvaluateDatasetPath(path).IsValid);
+
+    private static EvaluationResults EvaluateDatasetPath(string path)
+    {
+        var schema = JsonSchema.FromText(DeltaLakeSchemas.Dataset);
+        var instance = JsonSerializer.Deserialize<JsonElement>(
+            JsonSerializer.Serialize(new Dictionary<string, object?> { ["path"] = path }));
+        return schema.Evaluate(instance, new EvaluationOptions { OutputFormat = OutputFormat.List });
+    }
 }
