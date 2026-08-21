@@ -104,7 +104,7 @@ internal sealed record DeltaWriteOptions(
         // still has a single code, and every problem repeats its own code inline so none is lost.
         return DeltaErrors.Fail(
             problems[0].Code,
-            $"output '{spec.Output}' has {problems.Count} invalid write options — " +
+            $"output '{spec.Output}': {problems.Count} problems with this write — " +
             string.Join("; ", problems.Select(p => $"[{p.Code}] {p.What}")),
             string.Join(" ", problems.Select(p => p.NextStep).Distinct(StringComparer.Ordinal)));
     }
