@@ -96,6 +96,22 @@ internal static class DeltaSecretSql
                    $"client_secret {Literal(clientSecret)}, account_name {Literal(account)})";
         }
 
+        // DuckDB's azure secret type has no discrete account_key parameter — confirmed against a real
+        // DuckDB 1.5.5 instance, which rejects "type azure, ..., account_key '...'" with "Binder
+        // Error: Unknown parameter 'account_key' for secret type 'azure' with provider 'config'".
+        // Shared-key auth is only reachable by synthesizing the connection string DuckDB does accept;
+        // the synthesized string is itself a credential and goes through the same Literal() quoting
+        // as every other secret value here.
+        var accountKey = config.GetString("account_key");
+        if (!string.IsNullOrEmpty(account) && !string.IsNullOrEmpty(accountKey))
+        {
+            var connectionStringFromKey =
+                $"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={accountKey};" +
+                "EndpointSuffix=core.windows.net";
+            return $"create or replace secret {name} (type azure, provider config, " +
+                   $"connection_string {Literal(connectionStringFromKey)})";
+        }
+
         return null;
     }
 

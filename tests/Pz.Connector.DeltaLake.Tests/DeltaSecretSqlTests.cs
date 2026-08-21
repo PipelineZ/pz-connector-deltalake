@@ -39,6 +39,54 @@ public class DeltaSecretSqlTests
     }
 
     [Fact]
+    public void An_azure_root_with_only_account_name_and_key_synthesizes_a_connection_string_secret()
+    {
+        // DuckDB's azure secret type has no discrete account_key parameter (confirmed against a real
+        // DuckDB 1.5.5: "Unknown parameter 'account_key' for secret type 'azure'"), so shared-key auth
+        // must go through a synthesized connection string or it silently falls back to the ambient
+        // credential chain — an advertised connection option that would otherwise do nothing.
+        var sql = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("account_key", "bXlrZXk=")), "lake")
+            .Single(s => s.StartsWith("create or replace secret", StringComparison.Ordinal));
+
+        Assert.Contains("connection_string", sql);
+        Assert.Contains("DefaultEndpointsProtocol=https", sql);
+        Assert.Contains("AccountName=myacct", sql);
+        Assert.Contains("AccountKey=bXlrZXk=", sql);
+    }
+
+    [Fact]
+    public void A_connection_string_takes_precedence_over_account_name_and_key_when_both_are_given()
+    {
+        var sql = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("connection_string", "CS"),
+                ("account_name", "myacct"), ("account_key", "bXlrZXk=")), "lake")
+            .Single(s => s.StartsWith("create or replace secret", StringComparison.Ordinal));
+
+        Assert.Contains("connection_string 'CS'", sql);
+        Assert.DoesNotContain("AccountKey=", sql);
+    }
+
+    [Fact]
+    public void Single_quotes_in_a_synthesized_azure_connection_string_are_escaped()
+    {
+        var sql = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "acct"), ("account_key", "it's'a'key")), "lake")
+            .Single(s => s.StartsWith("create or replace secret", StringComparison.Ordinal));
+
+        Assert.Contains("it''s''a''key", sql);
+    }
+
+    [Fact]
+    public void An_azure_root_with_only_account_name_emits_no_secret_so_the_ambient_chain_applies()
+    {
+        // A half credential pair (no matching account_key) is the same fallback shape as the S3
+        // half-pair case: no secret, rather than a broken one.
+        var stmts = DeltaSecretSql.SetupStatements(Cfg(("root", "az://fs/d"), ("account_name", "myacct")), "lake");
+        Assert.DoesNotContain(stmts, s => s.Contains("secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void An_s3_root_with_no_credentials_emits_no_secret_so_the_ambient_chain_applies()
     {
         // Instance profiles and AWS_* environment credentials are a real deployment; forcing an empty
