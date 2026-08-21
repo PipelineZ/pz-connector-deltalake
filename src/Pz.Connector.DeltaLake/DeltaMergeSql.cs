@@ -65,9 +65,20 @@ internal static class DeltaMergeSql
 
     /// <summary>The two table aliases delta-rs fixes for a merge. A qualified reference may only use
     /// these; anything else names a table this statement does not have. Matched ordinally for the same
-    /// reason column names are — see <see cref="IsWellFormedPredicate"/>; "TARGET.dt" is refused here
+    /// reason column names are — see <see cref="Inspect"/>; "TARGET.dt" is refused here
     /// and refused by delta-rs.</summary>
     private static readonly string[] Qualifiers = ["target", "source"];
+
+    /// <summary>How a merge_predicate failed inspection. Two outcomes rather than one because the two
+    /// need different next steps: an unqualified column reference is a predicate the author almost got
+    /// right and can fix by adding one word, and telling them "it must be a boolean expression" would
+    /// leave them staring at an expression that already is one.</summary>
+    private enum PredicateVerdict
+    {
+        Ok,
+        Unqualified,
+        Malformed,
+    }
 
     /// <summary>A partition literal that is a bare number: an optional sign, digits, an optional
     /// fraction, an optional exponent, and nothing else. Anything with more structure than this has to
@@ -95,10 +106,28 @@ internal static class DeltaMergeSql
             // leaves a paren open lets the generator's own trailing ')' close a clause the predicate
             // opened, which is how a predicate reaches past the ON clause and injects its own WHEN
             // clause. Both results are well-formed SQL, so the terminator blocklist cannot see them.
-            if (Forbidden.IsMatch(predicate)
+            var verdict = Forbidden.IsMatch(predicate)
                 || predicate.AsSpan().IndexOfAny(Unmodelled) >= 0
                 || IsBlank(predicate)
-                || !IsWellFormedPredicate(predicate, columns))
+                ? PredicateVerdict.Malformed
+                : Inspect(predicate, columns);
+
+            if (verdict is PredicateVerdict.Unqualified)
+            {
+                // Every column this connector will accept by name is a column of the batch being
+                // written, so it exists on BOTH sides of the merge and an unqualified reference to it
+                // is ambiguous -- measured, not assumed: delta-rs answers one with "Ambiguous reference
+                // to unqualified field". It can never resolve, so it is refused here with a coded
+                // error rather than surfacing as an uncoded failure once the write is under way.
+                throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
+                    "'merge_predicate' must say which side of the merge each column belongs to: a merge " +
+                    "has both an existing row and an incoming one, so a bare column name matches " +
+                    "neither",
+                    "qualify every column with 'target.' for the existing row or 'source.' for the " +
+                    "incoming one, e.g. merge_predicate: \"target.dt >= '2026-01-01'\"");
+            }
+
+            if (verdict is PredicateVerdict.Malformed)
             {
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     "'merge_predicate' must be a single, self-contained boolean expression written only " +
@@ -178,9 +207,10 @@ internal static class DeltaMergeSql
         return true;
     }
 
-    /// <summary>True when the predicate is built entirely from the vocabulary a merge predicate needs,
-    /// every word in it is a permitted keyword or a column of <paramref name="columns"/>, and its
-    /// parentheses balance outside quoted regions.
+    /// <summary>Inspects the predicate: whether it is built entirely from the vocabulary a merge
+    /// predicate needs, whether every word in it is a permitted keyword or a column of
+    /// <paramref name="columns"/> qualified with the side it belongs to, and whether its parentheses
+    /// balance outside quoted regions.
     ///
     /// This is an ALLOWLIST, and that is the whole point. The predicate is handed to a lexer this
     /// connector does not own, cannot see and does not version-pin, so any check shaped as "block the
@@ -193,10 +223,19 @@ internal static class DeltaMergeSql
     /// never returns and there is no error for anything to report. The one thing this does not cover is
     /// a schema whose own column names are SQL words — see the keyword table above.
     ///
-    /// So a predicate may contain: a column of this output's schema, optionally qualified 'target.' or
-    /// 'source.' and optionally '"'-quoted; a keyword from the list above; a '\''-quoted string literal
+    /// So a predicate may contain: a column of this output's schema, qualified 'target.' or 'source.'
+    /// and optionally '"'-quoted; a keyword from the list above; a '\''-quoted string literal
     /// (doubled-character escape only, which is the sole escape this SQL dialect applies to it); a
     /// number; whitespace; ','; balanced parentheses; and the operators listed above.
+    ///
+    /// The qualifier is REQUIRED on a column, and the reason is narrower than "unqualified names are
+    /// bad": delta-rs resolves an unqualified name against both sides at once and errors with
+    /// "Ambiguous reference to unqualified field" only when the name is on both. Measured: with a
+    /// target wider than the incoming batch, an unqualified reference to a target-ONLY column resolves
+    /// fine. Every name this scanner can accept comes from the batch being written, so it is on both
+    /// sides by construction and can never resolve — which is what makes refusing it total rather than
+    /// merely cautious. A caller that ever resolves names against the TABLE's schema instead has to
+    /// revisit this, because a target-only column would then be a name that does resolve unqualified.
     ///
     /// Column names are matched ORDINALLY, quoted or not, because that is what the merge path does with
     /// them — measured against the shipped library, not assumed. Inside a MERGE predicate delta-rs
@@ -214,7 +253,7 @@ internal static class DeltaMergeSql
     /// This is a lexical scan, not SQL parsing: it recognizes token boundaries, resolves each word
     /// against a name list, and tracks paren depth. It makes no attempt to understand the
     /// expression.</summary>
-    private static bool IsWellFormedPredicate(string predicate, IReadOnlyList<string> columns)
+    private static PredicateVerdict Inspect(string predicate, IReadOnlyList<string> columns)
     {
         var depth = 0;
         var i = 0;
@@ -237,7 +276,7 @@ internal static class DeltaMergeSql
                 depth--;
                 if (depth < 0)
                 {
-                    return false;
+                    return PredicateVerdict.Malformed;
                 }
 
                 i++;
@@ -253,13 +292,13 @@ internal static class DeltaMergeSql
                 // different places, and a parenthesis falls on opposite sides of the two.
                 if (i > 0 && IsIdentifierChar(predicate[i - 1]))
                 {
-                    return false;
+                    return PredicateVerdict.Malformed;
                 }
 
                 var end = SkipQuoted(predicate, i, c);
                 if (end < 0)
                 {
-                    return false;
+                    return PredicateVerdict.Malformed;
                 }
 
                 i = end;
@@ -268,7 +307,7 @@ internal static class DeltaMergeSql
             {
                 if (!TryReadWord(predicate, ref i, out var word, out var quoted))
                 {
-                    return false;
+                    return PredicateVerdict.Malformed;
                 }
 
                 if (i < predicate.Length && predicate[i] == '.')
@@ -282,13 +321,20 @@ internal static class DeltaMergeSql
                         || !TryReadWord(predicate, ref i, out var column, out _)
                         || !columns.Contains(column, StringComparer.Ordinal))
                     {
-                        return false;
+                        return PredicateVerdict.Malformed;
                     }
                 }
-                else if (!columns.Contains(word, StringComparer.Ordinal)
-                         && !(!quoted && Keywords.Contains(word, StringComparer.OrdinalIgnoreCase)))
+                else if (!quoted && Keywords.Contains(word, StringComparer.OrdinalIgnoreCase))
                 {
-                    return false;
+                    // A keyword stands alone; only a column needs a side.
+                }
+                else if (columns.Contains(word, StringComparer.Ordinal))
+                {
+                    return PredicateVerdict.Unqualified;
+                }
+                else
+                {
+                    return PredicateVerdict.Malformed;
                 }
             }
             else if (char.IsAsciiDigit(c))
@@ -305,16 +351,16 @@ internal static class DeltaMergeSql
 
                 if (!IsOperatorRun(predicate.AsSpan(start, i - start)))
                 {
-                    return false;
+                    return PredicateVerdict.Malformed;
                 }
             }
             else
             {
-                return false;
+                return PredicateVerdict.Malformed;
             }
         }
 
-        return depth == 0;
+        return depth == 0 ? PredicateVerdict.Ok : PredicateVerdict.Malformed;
     }
 
     /// <summary>Reads one word — a bare identifier or a '"'-quoted one — advancing

@@ -314,8 +314,8 @@ public class WriteSessionTests
     public void An_option_problem_carries_a_config_code_not_the_runtime_write_code()
     {
         // PZDL0404 is the runtime family — a storage-layer write failure. An option problem is decided
-        // from the OutputSpec alone, before anything is opened, and a troubleshooting entry that has to
-        // explain both causes under one code helps nobody.
+        // from the OutputSpec alone, before anything is opened, and one code that has to explain both
+        // causes at once helps nobody.
         var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
             new OutputSpec("lake", "orders", "append", "fail_on_change",
                 new Dictionary<string, object?> { ["nonsense"] = 1L })));
@@ -850,7 +850,7 @@ public class WriteSessionTests
         var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await sink.BeginWriteAsync(
             Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default));
         // The config family, not the runtime one: this is decided from the OutputSpec alone, before
-        // anything is opened, and PZDL0404's troubleshooting entry is about storage-layer failures.
+        // anything is opened, and PZDL0404 is about storage-layer failures.
         Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
         Assert.Contains("merge", ex.Message);
         Assert.False(Directory.Exists(Path.Combine(dir, "orders")));

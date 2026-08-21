@@ -82,7 +82,11 @@ public class DeltaMergeSqlTests
     }
 
     [Theory]
-    [InlineData("dt >= '2026-01-01'")]
+    // Qualified, because a merge has two sides and a bare column name resolves to neither. The
+    // unqualified spelling of this predicate is the refusal case in
+    // A_predicate_that_does_not_say_which_side_a_column_belongs_to_is_refused.
+    [InlineData("target.dt >= '2026-01-01'")]
+    [InlineData("source.dt >= '2026-01-01'")]
     public void A_well_formed_merge_predicate_is_accepted(string predicate) =>
         Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
 
@@ -215,6 +219,10 @@ public class DeltaMergeSqlTests
     [InlineData("target.dt = \"dt")]
     [InlineData("target.dt = \"dtX")]
     [InlineData("target.\"dt = 'x'")]
+    // The same shapes in a QUALIFIED position, where a truncated remainder that happens to name a
+    // column would otherwise be accepted outright rather than merely refused for a different reason.
+    [InlineData("target.\"dt")]
+    [InlineData("target.\"dtX")]
     [InlineData("target.dt ! 'a'")]
     public void A_predicate_outside_the_permitted_alphabet_is_refused(string predicate)
     {
@@ -334,18 +342,16 @@ public class DeltaMergeSqlTests
 
     [Theory]
     [InlineData("target.region = 'eu' AND target.dt > '2026-01-01'")]
-    [InlineData("\"weird col\" = 1")]
     [InlineData("source.region = 'eu'")]
     [InlineData("target.\"weird col\" >= 1")]
-    [InlineData("a_ = 'x'")]
-    [InlineData("a1 = 'x'")]
+    [InlineData("source.\"weird col\" = 1")]
+    [InlineData("target.a_ = 'x'")]
+    [InlineData("target.a1 = 'x'")]
     // A '"' inside a quoted column name is written doubled, and has to be read back as one character
     // before the name can be matched against the schema.
-    [InlineData("\"q\"\"c\" = 1")]
+    [InlineData("target.\"q\"\"c\" = 1")]
     // A column whose name is not all lower case is reachable by writing its name, in its own case,
     // either bare or quoted — which is what the merge path resolves.
-    [InlineData("Amt >= 0")]
-    [InlineData("\"Amt\" >= 0")]
     [InlineData("target.Amt >= 0")]
     [InlineData("target.\"Amt\" >= 0")]
     [InlineData("\"target\".Amt >= 0")]
@@ -363,9 +369,15 @@ public class DeltaMergeSqlTests
     // Folding case here would accept predicates the merge then refuses. (The same engine's ordinary
     // SELECT planner behaves the OPPOSITE way — it lowercases an unquoted identifier first — which is
     // why this rule is measured on the path that actually runs it rather than reasoned about.)
-    [InlineData("DT >= '2026-01-01'")]
-    [InlineData("\"DT\" >= '2026-01-01'")]
+    // Unqualified as well as qualified: an unqualified name that differs only in case names nothing, so
+    // it must NOT be met with the add-a-qualifier advice — which is also what keeps the case rule
+    // observable on the unqualified path, where both outcomes refuse.
+    [InlineData("DT >= '2020-05-05'")]
+    [InlineData("\"DT\" >= '2020-05-05'")]
     [InlineData("AMT >= 0")]
+    [InlineData("source.DT >= '2026-01-01'")]
+    [InlineData("source.\"DT\" >= '2026-01-01'")]
+    [InlineData("source.AMT >= 0")]
     [InlineData("target.DT >= '2026-01-01'")]
     [InlineData("target.\"DT\" >= '2026-01-01'")]
     [InlineData("target.AMT >= 0")]
@@ -382,6 +394,47 @@ public class DeltaMergeSqlTests
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+
+        // A name that differs in case names NOTHING, so the refusal must not be the one that tells the
+        // author to add a qualifier — following that advice would not help. This is also what keeps
+        // the case rule observable now that both outcomes refuse.
+        Assert.DoesNotContain(WhichSide, ex.Message);
+    }
+
+    /// <summary>The phrase that separates the two PZDL0107 refusals: a predicate that names a real
+    /// column without a side, from one that names nothing at all.</summary>
+    private const string WhichSide = "which side of the merge";
+
+    [Theory]
+    // A merge has an existing row and an incoming one, so an unqualified column name matches neither.
+    // Measured: delta-rs answers one with "Ambiguous reference to unqualified field", every time, for
+    // every column of the batch being written -- so this can never run and is refused up front.
+    // The date differs from the one the refusal message uses as its example on purpose: the payload-free
+    // assertion below would otherwise trip on the message quoting a correctly-qualified predicate.
+    [InlineData("dt >= '2020-05-05'")]
+    [InlineData("\"weird col\" = 1")]
+    [InlineData("Amt >= 0")]
+    [InlineData("\"Amt\" >= 0")]
+    [InlineData("a_ = 'x'")]
+    [InlineData("id IN (1, 2) AND target.dt > '2026-01-01'")]
+    public void A_predicate_that_does_not_say_which_side_a_column_belongs_to_is_refused(string predicate)
+    {
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        Assert.Contains(WhichSide, ex.Message);
+        Assert.Contains("target.", ex.Message);
+        Assert.Contains("source.", ex.Message);
+        Assert.DoesNotContain(predicate, ex.Message);
+    }
+
+    [Fact]
+    public void A_keyword_needs_no_qualifier_because_only_a_column_has_a_side()
+    {
+        const string Predicate = "NOT (target.Amt IS NULL) AND TRUE";
+        Assert.Contains(
+            Predicate, DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: Predicate), null));
     }
 
     [Theory]
@@ -415,6 +468,7 @@ public class DeltaMergeSqlTests
             () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.DoesNotContain(predicate, ex.Message);
+        Assert.DoesNotContain(WhichSide, ex.Message);
     }
 
     [Theory]
