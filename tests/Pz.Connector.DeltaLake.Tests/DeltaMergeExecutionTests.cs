@@ -72,6 +72,33 @@ public class DeltaMergeExecutionTests
         Assert.Equal(20, outcome.Changed);
     }
 
+    [Fact]
+    public async Task The_assertion_also_sees_an_injection_that_no_row_counter_notices()
+    {
+        // A predicate that leaves a parenthesis OPEN reaches past the ON clause: the generated
+        // statement's own trailing ')' closes a VALUES '(' the predicate opened, and the injected
+        // WHEN NOT MATCHED clause then writes the added row instead of the generated one. Added,
+        // Changed and Total all come out exactly as a correct merge would produce them — only the
+        // VALUE of the added row differs, which is why AssertNarrowAsync compares it to its source.
+        const string Injected =
+            "MERGE INTO target USING source ON target.\"id\" = source.\"id\" AND " +
+            "($$($$ IS NOT NULL AND 1=1) WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT " +
+            "(\"id\", \"dt\", \"amt\") VALUES (source.\"id\", $$)$$ || source.\"dt\", source.\"amt\")\n" +
+            "WHEN MATCHED THEN UPDATE SET target.\"dt\" = source.\"dt\", target.\"amt\" = source.\"amt\"\n" +
+            "WHEN NOT MATCHED THEN INSERT (\"id\", \"dt\", \"amt\") VALUES " +
+            "(source.\"id\", source.\"dt\", source.\"amt\")";
+
+        var outcome = await MergeAsync(Injected);
+
+        Assert.Equal(1, outcome.Added);
+        Assert.Equal(0, outcome.Changed);
+        Assert.Equal(21, outcome.Total);
+
+        var added = Assert.Single(outcome.Rows, r => r.Id == AbsentKey);
+        Assert.Equal(")" + SourceRow.Dt, added.Dt);
+        Assert.NotEqual(SourceRow.Dt, added.Dt);
+    }
+
     private static async Task AssertNarrowAsync(string sql)
     {
         var outcome = await MergeAsync(sql);
@@ -79,9 +106,18 @@ public class DeltaMergeExecutionTests
         Assert.Equal(1, outcome.Added);
         Assert.Equal(0, outcome.Changed);
         Assert.Equal(21, outcome.Total);
+
+        // The added row's VALUES, not just its existence. A predicate that leaves a parenthesis open
+        // lets the generated statement's own trailing ')' close a WHEN clause the predicate itself
+        // opened, and the injected clause then writes the row instead of the generated one — a merge
+        // that adds exactly one row, changes nothing else, and still corrupts what it wrote. Counting
+        // rows cannot see that; comparing the row to its source can.
+        var added = Assert.Single(outcome.Rows, r => r.Id == AbsentKey);
+        Assert.Equal(SourceRow.Dt, added.Dt);
+        Assert.Equal(SourceRow.Amt, added.Amt);
     }
 
-    private static async Task<(int Added, int Changed, int Total)> MergeAsync(string sql)
+    private static async Task<(int Added, int Changed, int Total, IReadOnlyList<(long Id, string Dt, double Amt)> Rows)> MergeAsync(string sql)
     {
         var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
         try
@@ -117,7 +153,7 @@ public class DeltaMergeExecutionTests
             var changed = after.Count(r => byId.TryGetValue(r.Id, out var b) && (b.Dt != r.Dt || b.Amt != r.Amt));
             var added = after.Count(r => !byId.ContainsKey(r.Id));
 
-            return (added, changed, after.Count);
+            return (added, changed, after.Count, after);
         }
         finally
         {

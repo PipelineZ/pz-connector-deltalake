@@ -8,7 +8,8 @@ namespace Pz.Connector.DeltaLake;
 /// <summary>The connector's error registry and the one place a delta-rs failure becomes a pz error.
 /// Codes carry a PZDL prefix rather than PZ: pz owns the PZ registry and wraps connector failures in
 /// its own node-failure code, so a connector minting PZ codes would collide with it. Every code here
-/// must appear in docs/troubleshooting.md — a test enforces that.</summary>
+/// carries a next step in the message it is raised with; there is not yet a troubleshooting page
+/// listing them, and nothing enforces that there is one.</summary>
 internal static class DeltaErrors
 {
     // Configuration (offline validation).

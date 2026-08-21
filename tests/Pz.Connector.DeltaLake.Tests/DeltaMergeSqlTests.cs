@@ -83,7 +83,6 @@ public class DeltaMergeSqlTests
 
     [Theory]
     [InlineData("dt >= '2026-01-01'")]
-    [InlineData("target.region = 'eu' AND target.dt > '2026-01-01'")]
     public void A_well_formed_merge_predicate_is_accepted(string predicate) =>
         Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
 
@@ -236,7 +235,6 @@ public class DeltaMergeSqlTests
     [InlineData("target.dt LIKE 'a%'")]
     [InlineData("NOT (target.amt IS NULL) AND target.amt <> 0")]
     [InlineData("target.dt = 'it''s' OR target.dt != 'x'")]
-    [InlineData("\"weird col\" = 1")]
     [InlineData("target.amt >= -1.5")]
     [InlineData("target.amt * 2 + 1 <= 10 / 5")]
     public void An_ordinary_predicate_survives_the_alphabet_check(string predicate) =>
@@ -280,6 +278,9 @@ public class DeltaMergeSqlTests
 
     [Theory]
     [InlineData("$$x$$")]
+    // A trailing newline is not part of a number. It is called out because the anchor that refuses it
+    // is easy to write as one that does not: '$' matches before a final newline.
+    [InlineData("1\n")]
     [InlineData("'a', 'b'")]
     [InlineData("'a' OR 1=1")]
     [InlineData("'a")]
@@ -307,6 +308,106 @@ public class DeltaMergeSqlTests
         var sql = DeltaMergeSql.Build(
             DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]);
         Assert.Contains($"target.\"dt\" IN ({literal})", sql);
+    }
+
+    /// <summary>A schema whose column names exercise the shapes the word rules have to handle: one
+    /// needing quotes, one ending in '_', one ending in a digit, and one containing a '"'.</summary>
+    private static Apache.Arrow.Schema AwkwardSchema() =>
+        new Apache.Arrow.Schema.Builder()
+            .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(Apache.Arrow.Types.StringType.Default).Nullable(false))
+            .Field(f => f.Name("region").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Field(f => f.Name("weird col").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(true))
+            .Field(f => f.Name("a_").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Field(f => f.Name("a1").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Field(f => f.Name("q\"c").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(true))
+            .Build();
+
+    [Theory]
+    [InlineData("target.region = 'eu' AND target.dt > '2026-01-01'", true)]
+    [InlineData("\"weird col\" = 1", true)]
+    [InlineData("source.region = 'eu'", true)]
+    [InlineData("target.\"weird col\" >= 1", true)]
+    [InlineData("a_ = 'x'", true)]
+    [InlineData("a1 = 'x'", true)]
+    // A '"' inside a quoted column name is written doubled, and has to be read back as one character
+    // before the name can be matched against the schema.
+    [InlineData("\"q\"\"c\" = 1", true)]
+    public void A_predicate_over_this_outputs_own_columns_is_accepted(string predicate, bool awkward)
+    {
+        var schema = awkward ? AwkwardSchema() : DeltaTestTable.Schema;
+        Assert.Contains(predicate, DeltaMergeSql.Build(schema, Opts(["id"], mergePredicate: predicate), null));
+    }
+
+    [Theory]
+    // A subquery does not merely fail to run: it aborts delta-rs inside native code and the merge call
+    // then never returns, so there is no error, no event and nothing for a retry to act on. It is
+    // refused because SELECT and FROM are not in the vocabulary, not because they are blocked by name.
+    [InlineData("target.id IN (SELECT id FROM target)")]
+    [InlineData("target.id IN (SELECT id FROM nosuchtable)")]
+    [InlineData("EXISTS (SELECT amt FROM source)")]
+    // Function calls, casts and CASE are refused for the same reason, and this is a deliberate limit:
+    // the vocabulary a foreign SQL engine accepts is not one this connector can enumerate.
+    [InlineData("abs(target.amt) > 100")]
+    [InlineData("CAST(target.amt AS INT) > 1")]
+    [InlineData("CASE WHEN target.amt > 1 THEN 1 ELSE 0 END = 1")]
+    // A column this output does not have, a qualifier that is not one of the two aliases delta-rs
+    // fixes for a merge, and a three-part name.
+    [InlineData("target.nosuchcolumn = 1")]
+    [InlineData("nosuchcolumn = 1")]
+    [InlineData("other.dt = 'a'")]
+    [InlineData("target.dt.x = 1")]
+    // A trailing 'e' is only part of a number when digits follow it; otherwise it is a word, and an
+    // unknown one.
+    [InlineData("target.amt = 1e")]
+    [InlineData("target.amt = 1ex")]
+    public void A_predicate_naming_anything_but_a_column_or_a_keyword_is_refused(string predicate)
+    {
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        Assert.DoesNotContain(predicate, ex.Message);
+    }
+
+    [Theory]
+    // '-', '/' and '*' are all legal operator characters and a comment's own text can be made to sit
+    // inside the permitted vocabulary, so the terminator blocklist is the ONLY thing refusing these.
+    // Both were executed unguarded against a real table and rewrote all 20 rows: one comment hides a
+    // '(' and a later one hides a ')', which leaves this connector's paren count balanced while the
+    // SQL engine's dips negative and closes the wrapping group early.
+    [InlineData("1=1 --(\n) OR (1=1 --)\nAND 1=1")]
+    [InlineData("1=1 -- (\n) OR (1=1 -- )\nAND 1=1")]
+    [InlineData("target.dt = 'a' /*(*/) OR (1=1 /*)*/ AND 1=1")]
+    public void A_predicate_hiding_a_paren_in_a_comment_is_refused(string predicate)
+    {
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+    }
+
+    [Theory]
+    // The string-prefix rule looks at the character before the quote, and every identifier character
+    // counts: a digit and an underscore as much as a letter.
+    [InlineData("target.dt = 1'a'", false)]
+    [InlineData("a_'x' = 'y'", true)]
+    [InlineData("a1'x' = 'y'", true)]
+    public void A_quote_directly_after_any_identifier_character_is_refused(string predicate, bool awkward)
+    {
+        var schema = awkward ? AwkwardSchema() : DeltaTestTable.Schema;
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+    }
+
+    [Fact]
+    public void The_refusal_says_what_to_write_instead_of_a_function_call()
+    {
+        // Refusing function calls is a deliberate limit rather than an oversight, so the message has to
+        // leave the user somewhere to go.
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "abs(target.amt) > 1"), null));
+        Assert.Contains("Function calls", ex.Message);
+        Assert.Contains("pipeline's SQL", ex.Message);
     }
 
     [Fact]

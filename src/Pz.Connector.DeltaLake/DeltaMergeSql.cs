@@ -12,7 +12,15 @@ internal sealed record PartitionFilter(string Column, IReadOnlyList<string> Lite
 /// predicate is rejected by its SQL parser, so the whole statement must be produced here.
 ///
 /// The ON clause is the only thing that decides what a merge costs: it is what prunes the target scan.
-/// An unconstrained merge scans the whole table, so its cost grows with the TABLE, not the input.</summary>
+/// An unconstrained merge scans the whole table, so its cost grows with the TABLE, not the input.
+///
+/// A user-supplied merge_predicate may only compare the output's own columns against literals. Function
+/// calls, casts, CASE and subqueries are refused — a deliberate limit, not an oversight: the predicate
+/// is interpolated into a statement handed to a SQL engine this connector does not own, and the
+/// vocabulary that engine accepts is not a vocabulary this connector can enumerate. A subquery is worse
+/// than merely unsupported there, because it aborts inside native code before any error can be raised
+/// and the merge call then never returns. Compute a derived value in the pipeline's own SQL and compare
+/// against a column here.</summary>
 internal static class DeltaMergeSql
 {
     /// <summary>A merge_predicate must be a predicate, not an arbitrary SQL tail. Statement
@@ -42,11 +50,22 @@ internal static class DeltaMergeSql
 
     private const string OperatorChars = "=<>!+-*/";
 
+    /// <summary>The complete word vocabulary. Every other bare word in a predicate has to be a column of
+    /// the output's own schema, which is what keeps SELECT, FROM, EXISTS and every function name out
+    /// without this connector having to know their names. Compared case-insensitively because SQL
+    /// keywords are; column names are not, and are compared ordinally.</summary>
+    private static readonly string[] Keywords =
+        ["AND", "OR", "NOT", "IS", "NULL", "IN", "BETWEEN", "LIKE", "TRUE", "FALSE"];
+
+    /// <summary>The two table aliases delta-rs fixes for a merge. A qualified reference may only use
+    /// these; anything else names a table this statement does not have.</summary>
+    private static readonly string[] Qualifiers = ["target", "source"];
+
     /// <summary>A partition literal that is a bare number: an optional sign, digits, an optional
     /// fraction, an optional exponent, and nothing else. Anything with more structure than this has to
     /// arrive as a quoted string literal instead.</summary>
     private static readonly Regex NumericLiteral = new(
-        @"^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$", RegexOptions.Compiled);
+        @"\A[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?\z", RegexOptions.Compiled);
 
     public static string Build(
         Schema schema, DeltaWriteOptions options, IReadOnlyList<PartitionFilter>? partitionFilters)
@@ -71,15 +90,19 @@ internal static class DeltaMergeSql
             if (Forbidden.IsMatch(predicate)
                 || predicate.AsSpan().IndexOfAny(Unmodelled) >= 0
                 || IsBlank(predicate)
-                || !IsWellFormedPredicate(predicate))
+                || !IsWellFormedPredicate(predicate, columns))
             {
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     "'merge_predicate' must be a single, self-contained boolean expression written only " +
-                    "from column references, '\"'-quoted identifiers, '\\''-quoted string literals, " +
-                    "numbers, comparison and boolean operators and balanced parentheses; it may not be " +
-                    "blank, and it may not contain a statement separator, a comment, an unbalanced " +
-                    "parenthesis, a dollar sign, a backtick, a backslash, or a prefixed string literal",
-                    "write it as a plain predicate, e.g. merge_predicate: \"target.dt >= '2026-01-01'\"");
+                    "from this output's own columns (optionally qualified 'target.' or 'source.'), " +
+                    "'\''-quoted string literals, numbers, balanced parentheses, the operators " +
+                    "= <> != < > <= >= + - * / and the words AND OR NOT IS NULL IN BETWEEN LIKE TRUE " +
+                    "FALSE; it may not be blank, and it may not contain a statement separator, a " +
+                    "comment, an unbalanced parenthesis, a dollar sign, a backtick, a backslash, or a " +
+                    "prefixed string literal",
+                    "write it as a plain comparison over this output's columns, e.g. merge_predicate: " +
+                    "\"target.dt >= '2026-01-01'\". Function calls, casts, CASE and subqueries are not " +
+                    "accepted here: derive the value in the pipeline's SQL and compare a column to it");
             }
 
             on += $" AND ({predicate})";
@@ -147,25 +170,33 @@ internal static class DeltaMergeSql
         return true;
     }
 
-    /// <summary>True when the predicate is built entirely from the lexical alphabet a merge predicate
-    /// needs, and its parentheses balance outside quoted regions.
+    /// <summary>True when the predicate is built entirely from the vocabulary a merge predicate needs,
+    /// every word in it is a permitted keyword or a column of <paramref name="columns"/>, and its
+    /// parentheses balance outside quoted regions.
     ///
     /// This is an ALLOWLIST, and that is the whole point. The predicate is handed to a lexer this
     /// connector does not own, cannot see and does not version-pin, so any check shaped as "block the
     /// forms I know about" has to agree with that lexer byte for byte forever and silently opens a
     /// hole the first time the foreign lexer learns a new one. Refusing everything outside a fixed,
-    /// small alphabet fails the other way: an unknown construct is refused, not passed through.
-    /// A predicate may contain bare identifiers and '.', '"'-quoted identifiers and '\''-quoted string
-    /// literals (doubled-character escape only, which is the sole escape this SQL dialect applies to
-    /// them), numbers, whitespace, ',', balanced parentheses, and the operators listed above.
+    /// small vocabulary fails the other way: an unknown construct is refused, not passed through. That
+    /// applies to WORDS exactly as it applies to characters, which is why an unrecognized bare word is
+    /// refused rather than a list of dangerous ones being blocked: SELECT, FROM and EXISTS are only the
+    /// three that happen to be known to abort delta-rs inside native code, where the merge call then
+    /// never returns and there is no error for anything to report.
+    ///
+    /// So a predicate may contain: a column of this output's schema, optionally qualified 'target.' or
+    /// 'source.' and optionally '"'-quoted; a keyword from the list above; a '\''-quoted string literal
+    /// (doubled-character escape only, which is the sole escape this SQL dialect applies to it); a
+    /// number; whitespace; ','; balanced parentheses; and the operators listed above.
     ///
     /// Balance is checked here rather than in a second pass because both checks need the same model of
     /// where quoted regions start and end. Two scanners carrying two copies of that model is the same
     /// must-agree-forever problem this allowlist exists to escape, one scope smaller.
     ///
-    /// This is a lexical scan, not SQL parsing: it recognizes token boundaries and paren depth and
-    /// makes no attempt to understand the expression.</summary>
-    private static bool IsWellFormedPredicate(string predicate)
+    /// This is a lexical scan, not SQL parsing: it recognizes token boundaries, resolves each word
+    /// against a name list, and tracks paren depth. It makes no attempt to understand the
+    /// expression.</summary>
+    private static bool IsWellFormedPredicate(string predicate, IReadOnlyList<string> columns)
     {
         var depth = 0;
         var i = 0;
@@ -174,7 +205,7 @@ internal static class DeltaMergeSql
         {
             var c = predicate[i];
 
-            if (char.IsWhiteSpace(c) || c is ',' or '.')
+            if (char.IsWhiteSpace(c) || c == ',')
             {
                 i++;
             }
@@ -193,7 +224,7 @@ internal static class DeltaMergeSql
 
                 i++;
             }
-            else if (c is '\'' or '"')
+            else if (c == '\'')
             {
                 // A quote directly after an identifier character is a string-literal PREFIX: E'…',
                 // e'…', U&'…', R'…', N'…', X'…', B'…'. Refusing the whole shape kills the class in one
@@ -215,21 +246,36 @@ internal static class DeltaMergeSql
 
                 i = end;
             }
-            else if (char.IsAsciiLetter(c) || c == '_')
+            else if (c == '"' || char.IsAsciiLetter(c) || c == '_')
             {
-                i++;
-                while (i < predicate.Length && IsIdentifierChar(predicate[i]))
+                if (!TryReadWord(predicate, ref i, out var word))
                 {
+                    return false;
+                }
+
+                if (i < predicate.Length && predicate[i] == '.')
+                {
+                    // Only the two aliases delta-rs fixes for a merge may qualify a reference, and only
+                    // a column may follow the dot. A third part ("target.dt.x") needs no check of its
+                    // own: '.' is not a token anywhere else, so the second dot falls through to the
+                    // refusal at the end of this loop.
                     i++;
+                    if (!Qualifiers.Contains(word, StringComparer.Ordinal)
+                        || !TryReadWord(predicate, ref i, out var column)
+                        || !columns.Contains(column, StringComparer.Ordinal))
+                    {
+                        return false;
+                    }
+                }
+                else if (!Keywords.Contains(word, StringComparer.OrdinalIgnoreCase)
+                         && !columns.Contains(word, StringComparer.Ordinal))
+                {
+                    return false;
                 }
             }
             else if (char.IsAsciiDigit(c))
             {
-                i++;
-                while (i < predicate.Length && char.IsAsciiDigit(predicate[i]))
-                {
-                    i++;
-                }
+                SkipNumber(predicate, ref i);
             }
             else if (OperatorChars.Contains(c))
             {
@@ -251,6 +297,97 @@ internal static class DeltaMergeSql
         }
 
         return depth == 0;
+    }
+
+    /// <summary>Reads one word — a bare identifier or a '"'-quoted one — advancing
+    /// <paramref name="i"/> past it and yielding the name with the quoting removed. False if there is
+    /// no word there, if a quoted one never closes, or if a '"' sits directly after an identifier
+    /// character, which is the string-prefix shape refused above.</summary>
+    private static bool TryReadWord(string s, ref int i, out string word)
+    {
+        word = string.Empty;
+
+        if (i >= s.Length)
+        {
+            return false;
+        }
+
+        if (s[i] == '"')
+        {
+            if (i > 0 && IsIdentifierChar(s[i - 1]))
+            {
+                return false;
+            }
+
+            var end = SkipQuoted(s, i, '"');
+            if (end < 0)
+            {
+                return false;
+            }
+
+            word = s[(i + 1)..(end - 1)].Replace("\"\"", "\"");
+            i = end;
+            return true;
+        }
+
+        if (!char.IsAsciiLetter(s[i]) && s[i] != '_')
+        {
+            return false;
+        }
+
+        var start = i;
+        i++;
+        while (i < s.Length && IsIdentifierChar(s[i]))
+        {
+            i++;
+        }
+
+        word = s[start..i];
+        return true;
+    }
+
+    /// <summary>Advances past a numeric literal: digits, an optional fraction, an optional exponent.
+    /// A trailing 'e' with no digits after it is left where it is, so the word rules above see it and
+    /// refuse it rather than this method swallowing a name.</summary>
+    private static void SkipNumber(string s, ref int i)
+    {
+        while (i < s.Length && char.IsAsciiDigit(s[i]))
+        {
+            i++;
+        }
+
+        if (i < s.Length && s[i] == '.')
+        {
+            i++;
+            while (i < s.Length && char.IsAsciiDigit(s[i]))
+            {
+                i++;
+            }
+        }
+
+        if (i >= s.Length || (s[i] != 'e' && s[i] != 'E'))
+        {
+            return;
+        }
+
+        var mark = i;
+        i++;
+        if (i < s.Length && (s[i] == '+' || s[i] == '-'))
+        {
+            i++;
+        }
+
+        if (i < s.Length && char.IsAsciiDigit(s[i]))
+        {
+            while (i < s.Length && char.IsAsciiDigit(s[i]))
+            {
+                i++;
+            }
+        }
+        else
+        {
+            i = mark;
+        }
     }
 
     /// <summary>True when a run of operator characters decomposes into a sequence of known operators.
