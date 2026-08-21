@@ -404,7 +404,22 @@ internal sealed class DeltaLakeSink : ISink
         {
             if (!byName.TryGetValue(field.Name, out var existing))
             {
-                if (!evolving)
+                // A name that collides with an existing column case-insensitively is checked before
+                // anything else, because it is not the "new column" it looks like. Delta cannot hold two
+                // columns whose names differ only in case: measured, delta-rs refuses the widening
+                // insert with "Duplicate field name (case-insensitive)". Left to it, that arrives at
+                // commit as an uncoded failure whose next step talks about protocol versions, which have
+                // nothing to do with two spellings of one name — and under 'evolve' it arrives only
+                // after the table has been opened and the whole pipeline buffered.
+                var collision = table.FieldsList.FirstOrDefault(
+                    f => string.Equals(f.Name, field.Name, StringComparison.OrdinalIgnoreCase));
+                if (collision is not null)
+                {
+                    problems.Add(
+                        $"column '{field.Name}' differs from the table's '{collision.Name}' only in case, " +
+                        "and Delta cannot hold both");
+                }
+                else if (!evolving)
                 {
                     problems.Add($"column '{field.Name}' is not in the table");
                 }
@@ -456,9 +471,11 @@ internal sealed class DeltaLakeSink : ISink
                 $"cast or select the columns in the pipeline SQL to match the table; set schema_policy: " +
                 $"{EvolvingSchemaPolicy} to let the write add a NULLABLE column the table lacks or leave a " +
                 "nullable one null; a column added by an append or a merge must be nullable, so declare " +
-                "it nullable in the pipeline SQL, or use strategy: replace, or create a new table with " +
-                "the full schema and backfill into it; a partitioning change needs a new table, because " +
-                "Delta cannot repartition one in place");
+                "it nullable in the pipeline SQL, or use strategy: replace — which discards every row " +
+                "the table holds and rewrites it from this run's data — or create a new table with the " +
+                "full schema and backfill into it; two columns whose names differ only in case cannot " +
+                "both exist, so rename one; a partitioning change needs a new table, because Delta " +
+                "cannot repartition one in place");
         }
     }
 
@@ -475,7 +492,14 @@ internal sealed class DeltaLakeSink : ISink
     /// survives that predates the column, and the write commits and reads back with the value present.
     /// A replace that writes nothing at all takes the DeleteAsync path, which changes no schema — also
     /// measured. Time travel is unaffected either way, because an older version carries its own narrower
-    /// schema.</summary>
+    /// schema.
+    ///
+    /// WHAT KEEPS THE OVERWRITE TOTAL, because the exemption is only sound while it is: DeltaLake.Net's
+    /// InsertOptions exposes a Predicate property — delta-rs's replaceWhere — which scopes an overwrite
+    /// to the rows it matches. This connector never sets it; both construction sites in
+    /// DeltaWriteSession pass SaveMode alone. Exposing a replace_where write option, or setting Predicate
+    /// for any other reason, would make a replace partial, leave rows behind that predate an added
+    /// column, and make this exemption WRONG — without anyone editing this method.</summary>
     private static bool RowsCanOutliveTheWrite(string mode) => mode != "replace";
 
     /// <summary>A fully parameterized name for an Arrow type. Apache.Arrow's own <c>Name</c> drops the

@@ -127,8 +127,9 @@ internal static class DeltaStorageOptions
         {
             // DeltaErrors.Translate rethrows OperationCanceledException before classifying anything
             // else, so a run that was stopped on purpose is never reported as a doomed one. Every other
-            // failure lands on TableUnreadable (PZDL0201) here because "read" is in the operation name
-            // — that branch exists specifically so read paths get a read code instead of WriteFailed.
+            // failure lands on TableUnreadable (PZDL0201) here because of the DeltaOperationKind.Read
+            // passed below — the kind is what classifies, never the operation text, which embeds the
+            // user's own dataset name and would misclassify one containing "read".
             throw DeltaErrors.Translate(ex, DeltaOperationKind.Read, $"read of dataset '{dataset}'", []);
         }
     }

@@ -643,7 +643,11 @@ public class MergeErrorTests
         var ex = await Assert.ThrowsAsync<PzConnectorException>(
             async () => await sink.BeginWriteAsync(spec, WithRequiredNote, default));
 
-        Assert.Contains(strategy, ex.Message);
+        // The interpolated phrase, not the bare strategy name: the shared next step names both "append"
+        // and "merge" as boilerplate, so Assert.Contains(strategy, …) passes even when the message
+        // never mentions which strategy was refused. Naming it is the whole point of scoping the rule
+        // by strategy, and this is what pins it.
+        Assert.Contains($"strategy '{strategy}'", ex.Message);
 
         Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
         Assert.Contains("'note'", ex.Message);
@@ -746,6 +750,36 @@ public class MergeErrorTests
         // 'merge' leave one. What every strategy must agree on is that the added column carries its
         // value — a row count alone would pass even if the column had been dropped.
         Assert.Contains(await ArchivedReadAsync(location), r => r.Id == 1 && r.Archived == "kept");
+    }
+
+    [Theory]
+    [InlineData("evolve")]
+    [InlineData("fail_on_change")]
+    public async Task A_column_differing_from_an_existing_one_only_in_case_is_refused_before_the_open(
+        string policy)
+    {
+        // Delta cannot hold two columns whose names differ only in case. Under 'evolve' the Ordinal
+        // lookup reads 'AMT' as a brand-new column and let it through, so the write was refused only at
+        // commit — by delta-rs, as an uncoded failure whose next step named the protocol version, which
+        // has nothing to do with two spellings of one name, and only after the table had been opened
+        // and the whole pipeline buffered.
+        var dir = TempDir("pz-delta-casecollide-" + policy);
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        var spec = Spec("append") with { SchemaPolicy = policy };
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, ShoutingAmt, default));
+
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+
+        // The whole sentence, not its words. Both spellings appear in the message anyway once the
+        // second loop reports 'amt' as a table column the write does not produce, and the shared next
+        // step contains the word "case" as boilerplate — so asserting on those pieces would pass with
+        // the refusal removed. Only the sentence that names one column AS the other's case variant
+        // varies with this rule.
+        Assert.Contains("column 'AMT' differs from the table's 'amt' only in case", ex.Message);
+        Assert.DoesNotContain("protocol version", ex.Message);
     }
 
     [Fact]
@@ -932,6 +966,14 @@ public class MergeErrorTests
                 }
             }
         });
+
+    /// <summary>'amt' spelled 'AMT': a column Delta cannot hold beside the one the table already
+    /// has.</summary>
+    private static readonly Schema ShoutingAmt = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+        .Field(f => f.Name("AMT").DataType(DoubleType.Default).Nullable(true))
+        .Build();
 
     /// <summary>Two NOT NULL additions at once, so an aggregate refusal has more than one to name.</summary>
     private static readonly Schema WithTwoRequired = new Schema.Builder()

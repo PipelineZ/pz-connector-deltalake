@@ -66,6 +66,15 @@ Use `merge_predicate` on top of that only to prune the target scan for speed —
 the condition appears. A condition that holds for the source and the target alike (`target.dt` matching
 a filter the pipeline already applied) prunes without excluding anything, which is the safe shape.
 
+**A rejected predicate can still leave the table wider.** The check this connector applies to
+`merge_predicate` is a lexical allowlist, not a SQL parser, so a predicate it accepts can still be
+rejected by the engine's own parser — reported as `PZDL0107`, naming the option. Under
+`schema_policy: evolve`, if that same run also added a column, the column has already been committed
+by the time the statement is parsed, so the run fails without writing a row and the table is left one
+nullable column wider. delta-rs offers no dry-run for a merge statement, so there is nothing to check
+against beforehand. Nothing is lost — the added column is nullable — but a later run under
+`fail_on_change` will then be refused for a column it does not produce.
+
 **Why this connector does not turn the exclusion into a skip.** Delta's `MERGE` can guard the insert
 branch as well (`WHEN NOT MATCHED AND (…)`), and delta-rs accepts one. Measured, for a predicate
 written only over `source.` columns, that does give a true skip: the excluded row is neither updated
@@ -128,16 +137,25 @@ read null in it.
 Under any other policy — including the default `fail_on_change` — a column the table lacks is refused
 with `PZDL0301`.
 
-**A column the write adds must be nullable.** Delta has no value to give it in rows committed before it
-existed, and none can be invented. A `NOT NULL` addition is refused with `PZDL0301`, before anything is
-written, on every strategy. The two workarounds are:
+**A column that `append` or `merge` adds must be nullable.** Delta has no value to give it in rows
+those strategies leave in place, and none can be invented. A `NOT NULL` addition is refused with
+`PZDL0301`, before anything is written. Three workarounds:
 
 - declare the column nullable in the pipeline SQL (`cast(x as varchar)` on a `null` branch, a
-  `try_cast`, or simply not marking it `not null`); or
-- create a new table with the full schema and backfill into it.
+  `try_cast`, or simply not marking it `not null`);
+- create a new table with the full schema and backfill into it; or
+- use `strategy: replace` — but know what it does first (below).
 
-The refusal stands **even when the table currently holds no rows**, where the addition would in fact
-succeed. That is deliberate. Establishing emptiness means counting rows and then acting on the answer,
+`replace` is exempt from the rule, because it is one **total** overwrite: every active file is
+rewritten, including partitions this run does not touch, so no row survives that predates the column.
+That is also the reason it is a workaround to reach for with care — `replace` **discards every row the
+table holds** and rewrites it from this run's data.
+
+Two columns whose names differ only in case cannot both exist, on any strategy: Delta rejects the
+pair, and the write is refused with `PZDL0301` naming both spellings.
+
+The `NOT NULL` refusal stands **even when the table currently holds no rows**, where the addition would
+in fact succeed. That is deliberate. Establishing emptiness means counting rows and then acting on the answer,
 and Delta is a multi-writer format — another writer can add rows in between. Losing that race produces
 exactly the outcome the rule exists to prevent, and it is a bad one: on `append` the write **commits
 successfully and says nothing**, and every later read of the table fails with `Non-nullable column 'x'

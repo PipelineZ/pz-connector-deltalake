@@ -261,8 +261,12 @@ internal sealed class DeltaWriteSession(
         var columns = targetColumns.ToList();
         var known = targetColumns.ToHashSet(StringComparer.Ordinal);
 
-        // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive, so a table column
-        // 'DT' does not cover an incoming 'dt' and both have to be nameable.
+        // Ordinal, and it has to stay Ordinal, for one reason only: it must MIRROR WidenAsync's own
+        // early-return predicate, which is Ordinal over the same inputs. That identity is what makes
+        // this union equal the schema the widening produces, which is the whole basis for building the
+        // statement before the widening commits. It is NOT that a table could hold 'DT' and 'dt' at
+        // once — measured, delta-rs refuses that widening outright ("Duplicate field name
+        // (case-insensitive)") and Reconcile now refuses it earlier still.
         columns.AddRange(schema.FieldsList.Select(f => f.Name).Where(n => known.Add(n)));
         return columns;
     }
@@ -293,8 +297,18 @@ internal sealed class DeltaWriteSession(
     /// The widening commits before the merge does, so a merge that then FAILS leaves the table widened.
     /// That is the same shape as an append's already-flushed generation, which is why this sink declares
     /// AbortSemantics.BestEffort, and it costs nothing: the added column is nullable and every existing
-    /// row reads null in it. A merge that is REFUSED is a different matter and is not in that category —
-    /// the statement is validated before this runs, so a configuration error never reaches here.
+    /// row reads null in it.
+    ///
+    /// Most REFUSALS no longer reach here: DeltaMergeSql.Build runs first, so a malformed
+    /// merge_predicate, an unquotable column name and an unusable partition filter are all raised before
+    /// anything commits. ONE CONFIGURATION ERROR STILL GETS PAST, and it is stated rather than denied
+    /// because a comment that overclaims stops the next reader looking: Build's allowlist is a lexical
+    /// scan, not a parser, so a predicate it admits and DataFusion then rejects — measured with
+    /// "target.id = 1 IN ()" — raises PZDL0107 AFTER this has committed, leaving the table one nullable
+    /// column wider with a commit in its log and no row written. It is not fixable locally: delta-rs
+    /// 0.33.0 offers no dry-run, prepare or explain for a merge statement, so there is nothing to
+    /// validate the statement against before the widening. docs/reference/write.md records the
+    /// consequence for users.
     ///
     /// Two writers widening at once is safe and needs no handling: measured, the loser gets delta-rs's
     /// "Metadata changed since last commit", which DeltaErrors classifies as a transient PZDL0401, and
