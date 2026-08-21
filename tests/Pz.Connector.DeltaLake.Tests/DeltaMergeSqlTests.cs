@@ -249,7 +249,7 @@ public class DeltaMergeSqlTests
     [InlineData("target.amt BETWEEN 1 AND 2")]
     [InlineData("target.dt LIKE 'a%'")]
     [InlineData("NOT (target.amt IS NULL) AND target.amt <> 0")]
-    [InlineData("target.dt = 'it''s' OR target.dt != 'x'")]
+    [InlineData("target.dt = 'a b' OR target.dt != 'x'")]
     [InlineData("target.amt >= -1.5")]
     [InlineData("target.amt * 2 + 1 <= 10 / 5")]
     public void An_ordinary_predicate_survives_the_alphabet_check(string predicate) =>
@@ -302,6 +302,14 @@ public class DeltaMergeSqlTests
     [InlineData("`a`")]
     [InlineData("x")]
     [InlineData("")]
+    // An interior quote or backslash is refused rather than read as an escape. These are the two
+    // shapes a producer that escaped instead of refusing would hand over, and they are exactly the
+    // ones the merge path mishandles -- see the doubled-quote theory below.
+    [InlineData("'it''s'")]
+    [InlineData("'O''''Brien'")]
+    [InlineData("''''")]
+    [InlineData(@"'back\'")]
+    [InlineData(@"'a\''b'")]
     public void A_partition_literal_that_is_not_one_self_contained_value_is_refused(string literal)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
@@ -315,7 +323,6 @@ public class DeltaMergeSqlTests
     // still the final character.
     [InlineData("'a;b'")]
     [InlineData("'a)b('")]
-    [InlineData("'it''s'")]
     [InlineData("42")]
     [InlineData("-1.5e3")]
     public void A_self_contained_partition_literal_is_accepted(string literal)
@@ -469,6 +476,28 @@ public class DeltaMergeSqlTests
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.DoesNotContain(predicate, ex.Message);
         Assert.DoesNotContain(WhichSide, ex.Message);
+    }
+
+    [Theory]
+    // A doubled quote is this dialect's own escape, and the region it delimits is measured correctly
+    // here -- so this refusal is stricter than the dialect on purpose. Measured against the shipped
+    // library: a predicate literal carrying ONE doubled quote is faithful (it compares as the value
+    // with a single quote in it), but one carrying two in a row compares as though only one level of
+    // doubling had been written, so the target row that should have matched is invisible and is
+    // inserted a second time instead. Telling those two apart needs a model of a foreign parser's
+    // unescaping which is already known to differ between that parser's own paths, so the escape is
+    // refused outright rather than modelled. The cost is real and deliberate: a value containing a
+    // quote cannot be named in a merge_predicate at all.
+    [InlineData("target.dt = 'it''s'")]
+    [InlineData("target.dt = 'a''''b'")]
+    [InlineData("target.dt = ''''")]
+    [InlineData("target.dt = 'a' OR target.dt = 'b''c'")]
+    public void A_merge_predicate_carrying_a_doubled_quote_is_refused(string predicate)
+    {
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        Assert.DoesNotContain(predicate, ex.Message);
     }
 
     [Theory]

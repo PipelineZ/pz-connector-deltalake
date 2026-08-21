@@ -43,7 +43,7 @@ public class DeltaMergeExecutionTests
     [InlineData("target.id IN (1, 2)")]
     [InlineData("NOT (target.amt IS NULL) AND target.amt <> -1")]
     [InlineData("target.dt LIKE '2026%'")]
-    [InlineData("target.dt = 'it''s' OR target.amt >= -1.5")]
+    [InlineData("target.dt = 'a b' OR target.amt >= -1.5")]
     public Task An_accepted_merge_predicate_cannot_widen_the_on_clause(string predicate) =>
         AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
 

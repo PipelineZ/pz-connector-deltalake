@@ -132,7 +132,8 @@ internal static class DeltaMergeSql
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     "'merge_predicate' must be a single, self-contained boolean expression written only " +
                     "from this output's own columns (optionally qualified 'target.' or 'source.'), " +
-                    "'\''-quoted string literals, numbers, balanced parentheses, the operators " +
+                    "'\''-quoted string literals carrying no quote of their own, numbers, balanced " +
+                    "parentheses, the operators " +
                     "= <> != < > <= >= + - * / and the words AND OR NOT IS NULL IN BETWEEN LIKE TRUE " +
                     "FALSE; it may not be blank, and it may not contain a statement separator, a " +
                     "comment, an unbalanced parenthesis, a dollar sign, a backtick, a backslash, or a " +
@@ -160,7 +161,8 @@ internal static class DeltaMergeSql
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     $"the partition filter derived for column '{filter.Column}' is not usable: a filter " +
                     "must carry at least one value, and each value must be a bare number or a single " +
-                    "quoted string literal that ends where the value ends",
+                    "quoted string literal that ends where the value ends and carries no quote or " +
+                    "backslash of its own",
                     "narrow the merge with 'merge_predicate' instead, or report this as a connector bug " +
                     "with the partition column's type");
             }
@@ -295,8 +297,18 @@ internal static class DeltaMergeSql
                     return PredicateVerdict.Malformed;
                 }
 
+                // A doubled quote INSIDE the literal is refused, even though it is this dialect's own
+                // escape and the region it delimits is measured correctly here. The reason is what the
+                // engine does with the region afterwards: measured against the shipped library, a
+                // predicate literal 'a''b' compares as a'b — faithful — while 'a''''b' compares as
+                // a'b too, not the a''b its author wrote, and the row that should have matched is
+                // inserted a second time instead. Telling the two apart needs a model of a foreign
+                // parser's unescaping that is already known to differ between its own paths, so the
+                // escape is refused outright. The cost is that a value containing a quote cannot be
+                // named in a merge_predicate at all; the alternative is a predicate that silently
+                // means something its author did not write.
                 var end = SkipQuoted(predicate, i, c);
-                if (end < 0)
+                if (end < 0 || predicate.AsSpan(i + 1, end - i - 2).Contains('\''))
                 {
                     return PredicateVerdict.Malformed;
                 }
@@ -511,13 +523,26 @@ internal static class DeltaMergeSql
     }
 
     /// <summary>True when a partition-filter value is one complete literal and nothing more: a bare
-    /// number, or a single-quoted string whose closing quote is its last character. The closing-quote
-    /// rule is what separates a value containing a comma or a semicolon — legal content, admitted —
-    /// from a second value smuggled into one slot, such as <c>'a', 'b'</c>.</summary>
+    /// number, or a quoted string that is exactly two quote characters with the value between them.
+    /// Requiring the closing quote to be the last character is what separates a value containing a
+    /// comma or a semicolon — legal content, admitted — from a second value smuggled into one slot,
+    /// such as <c>'a', 'b'</c>.
+    ///
+    /// An interior quote or backslash is refused rather than accepted as an escape, which is stricter
+    /// than the dialect and deliberately so. Measured against the shipped library: a literal carrying
+    /// a doubled quote compares as a value with one fewer level of doubling than it was written with,
+    /// so a filter built from a value containing <c>''</c> names a partition the table does not have,
+    /// the target row stays invisible to the merge's scan, and the row is inserted a second time with
+    /// no error; a literal carrying <c>\'</c> fails the whole write with an unterminated-literal
+    /// parser error. Those are the exact two shapes a producer that escaped instead of refusing would
+    /// hand over, so this is the check that has to see them — a guard that accepts every escape its
+    /// producer might invent cannot catch the producer being wrong about escaping.</summary>
     private static bool IsSelfContainedLiteral(string literal) =>
-        literal.Length > 0
-        && (NumericLiteral.IsMatch(literal)
-            || (literal[0] == '\'' && SkipQuoted(literal, 0, '\'') == literal.Length));
+        NumericLiteral.IsMatch(literal)
+        || (literal.Length >= 2
+            && literal[0] == '\''
+            && literal[^1] == '\''
+            && !literal.AsSpan(1, literal.Length - 2).ContainsAny('\'', '\\'));
 
     private static bool IsIdentifierChar(char c) => char.IsAsciiLetterOrDigit(c) || c == '_';
 
