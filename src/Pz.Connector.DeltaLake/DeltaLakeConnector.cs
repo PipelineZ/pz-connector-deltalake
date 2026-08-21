@@ -42,7 +42,7 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
             "deltalake connectivity is verified at run time when the table is opened"));
 
     ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+        new(new DeltaLakeSource(config));
 
     ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();
