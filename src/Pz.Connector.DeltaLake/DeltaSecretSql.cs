@@ -5,12 +5,22 @@ using Pz.Connectors.Abstractions;
 namespace Pz.Connector.DeltaLake;
 
 /// <summary>Setup statements the engine runs on its DuckDB session before a delta_scan fragment: the
-/// extension loads plus one scoped secret built from the connection config.
+/// extension loads plus one secret, scoped to this connection's own <c>root</c>, built from the
+/// connection config.
 ///
 /// Secret names carry a hash suffix because <c>create or replace</c> is last-wins: two connections
-/// whose names sanitize identically ("prod-db"/"prod_db") would otherwise silently share one secret
-/// and one set of credentials. Secret names are internal — nothing in plan.json, Reason strings, or
-/// events carries them, and no credential value ever leaves this file.</summary>
+/// whose names sanitize identically ("prod-db"/"prod_db") would otherwise silently clobber each
+/// other's CREATE SECRET *statement*. That solves a naming collision, not a selection one — DuckDB
+/// never resolves which secret to use by name. It matches the query path against each secret's SCOPE
+/// prefix list, and on a tie (two secrets whose scope both match, e.g. two S3 connections with no
+/// explicit scope both defaulting to <c>s3://</c>) it picks alphabetically by name, independent of
+/// creation order. Left unscoped, a project with a prod lake and a staging lake would have whichever
+/// <c>pz_delta_*</c> name sorts first silently authenticate every S3 (or Azure) delta read in the run
+/// — the other connection's credentials are simply never used, and it surfaces as a bucket-level 403
+/// naming nothing. Every secret this file builds therefore also carries <c>scope &lt;root&gt;</c>: the
+/// name disambiguates the statement, the scope disambiguates which credentials DuckDB actually picks.
+/// Secret names are internal — nothing in plan.json, Reason strings, or events carries them, and no
+/// credential value ever leaves this file.</summary>
 internal static class DeltaSecretSql
 {
     public static string SecretName(string connectionName) =>
@@ -26,7 +36,7 @@ internal static class DeltaSecretSql
             case DeltaScheme.S3:
                 statements.Add("install httpfs");
                 statements.Add("load httpfs");
-                if (S3Secret(config, SecretName(connectionName)) is { } s3)
+                if (S3Secret(config, SecretName(connectionName), root) is { } s3)
                 {
                     statements.Add(s3);
                 }
@@ -36,7 +46,7 @@ internal static class DeltaSecretSql
             case DeltaScheme.Azure:
                 statements.Add("install azure");
                 statements.Add("load azure");
-                if (AzureSecret(config, SecretName(connectionName)) is { } az)
+                if (AzureSecret(config, SecretName(connectionName), root) is { } az)
                 {
                     statements.Add(az);
                 }
@@ -51,37 +61,62 @@ internal static class DeltaSecretSql
         return statements;
     }
 
-    /// <summary>Null when no explicit credentials are configured: DuckDB's own credential chain
-    /// (instance profile, AWS_* environment) is a real deployment, and an empty secret would break it.</summary>
-    private static string? S3Secret(ConnectorConfig config, string name)
+    /// <summary>Null only when nothing s3-shaped is configured at all: DuckDB's own credential chain
+    /// (instance profile, AWS_* environment) is a real deployment, and an empty secret would break it.
+    /// When other options (endpoint, region, url_style, use_ssl, session_token) are set without an
+    /// explicit key pair — the MinIO-with-ambient-credentials shape — those options still have to
+    /// reach DuckDB, so the secret is built under <c>provider credential_chain</c> (which resolves the
+    /// actual key/secret from the same AWS_* environment / instance profile at CREATE SECRET time)
+    /// instead of being dropped outright and silently reading real AWS with the wrong endpoint.</summary>
+    private static string? S3Secret(ConnectorConfig config, string name, string root)
     {
         var keyId = config.GetString("access_key_id");
         var secret = config.GetString("secret_access_key");
-        if (string.IsNullOrEmpty(keyId) || string.IsNullOrEmpty(secret))
+        var sessionToken = config.GetString("session_token");
+        var region = config.GetString("region");
+        var endpoint = config.GetString("endpoint");
+        var urlStyle = config.GetString("url_style");
+        var hasUseSsl = config.Values.ContainsKey("use_ssl");
+        var hasKeyPair = !string.IsNullOrEmpty(keyId) && !string.IsNullOrEmpty(secret);
+
+        if (!hasKeyPair && string.IsNullOrEmpty(sessionToken) && string.IsNullOrEmpty(region) &&
+            string.IsNullOrEmpty(endpoint) && string.IsNullOrEmpty(urlStyle) && !hasUseSsl)
         {
             return null;
         }
 
-        var parts = new List<string> { "type s3", $"key_id {Literal(keyId)}", $"secret {Literal(secret)}" };
-        Add(parts, "session_token", config.GetString("session_token"));
-        Add(parts, "region", config.GetString("region"));
-        Add(parts, "endpoint", config.GetString("endpoint"));
-        Add(parts, "url_style", config.GetString("url_style"));
-        if (config.Values.ContainsKey("use_ssl"))
+        var parts = new List<string> { "type s3" };
+        if (hasKeyPair)
+        {
+            parts.Add($"key_id {Literal(keyId!)}");
+            parts.Add($"secret {Literal(secret!)}");
+        }
+        else
+        {
+            parts.Add("provider credential_chain");
+        }
+
+        Add(parts, "session_token", sessionToken);
+        Add(parts, "region", region);
+        Add(parts, "endpoint", endpoint);
+        Add(parts, "url_style", urlStyle);
+        if (hasUseSsl)
         {
             parts.Add($"use_ssl {(config.GetBool("use_ssl", true) ? "true" : "false")}");
         }
 
+        parts.Add($"scope {Literal(root)}");
+
         return $"create or replace secret {name} ({string.Join(", ", parts)})";
     }
 
-    private static string? AzureSecret(ConnectorConfig config, string name)
+    private static string? AzureSecret(ConnectorConfig config, string name, string root)
     {
         var connectionString = config.GetString("connection_string");
         if (!string.IsNullOrEmpty(connectionString))
         {
             return $"create or replace secret {name} (type azure, provider config, " +
-                   $"connection_string {Literal(connectionString)})";
+                   $"connection_string {Literal(connectionString)}, scope {Literal(root)})";
         }
 
         var account = config.GetString("account_name");
@@ -93,7 +128,8 @@ internal static class DeltaSecretSql
         {
             return $"create or replace secret {name} (type azure, provider service_principal, " +
                    $"tenant_id {Literal(tenant)}, client_id {Literal(clientId)}, " +
-                   $"client_secret {Literal(clientSecret)}, account_name {Literal(account)})";
+                   $"client_secret {Literal(clientSecret)}, account_name {Literal(account)}, " +
+                   $"scope {Literal(root)})";
         }
 
         // DuckDB's azure secret type has no discrete account_key parameter — confirmed against a real
@@ -109,7 +145,21 @@ internal static class DeltaSecretSql
                 $"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={accountKey};" +
                 "EndpointSuffix=core.windows.net";
             return $"create or replace secret {name} (type azure, provider config, " +
-                   $"connection_string {Literal(connectionStringFromKey)})";
+                   $"connection_string {Literal(connectionStringFromKey)}, scope {Literal(root)})";
+        }
+
+        // account_name alone, with no key and no service-principal quartet, is the managed-identity /
+        // instance-metadata deployment shape. Unlike S3, DuckDB's azure extension has NO ambient
+        // credential fallback at all — confirmed against a real DuckDB 1.5.5: a bare az:// read with
+        // no secret configured (even with AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT set
+        // in the environment) fails outright with "Invalid Input Error: No valid Azure credentials
+        // found!". A secret is mandatory for every az:// read, so account_name alone must still
+        // produce one: "type azure, provider credential_chain, account_name '<account>'" is the shape
+        // DuckDB documents for managed identity, and account_name is that provider's one parameter.
+        if (!string.IsNullOrEmpty(account))
+        {
+            return $"create or replace secret {name} (type azure, provider credential_chain, " +
+                   $"account_name {Literal(account)}, scope {Literal(root)})";
         }
 
         return null;
