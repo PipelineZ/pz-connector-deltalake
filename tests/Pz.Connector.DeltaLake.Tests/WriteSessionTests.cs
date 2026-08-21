@@ -849,7 +849,9 @@ public class WriteSessionTests
 
         var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await sink.BeginWriteAsync(
             Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default));
-        Assert.Contains("PZDL", ex.Message);
+        // The config family, not the runtime one: this is decided from the OutputSpec alone, before
+        // anything is opened, and PZDL0404's troubleshooting entry is about storage-layer failures.
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
         Assert.Contains("merge", ex.Message);
         Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
     }

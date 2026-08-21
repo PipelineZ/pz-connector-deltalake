@@ -20,10 +20,11 @@ internal static class DeltaErrors
     public const string CalendarTokenInReadPath = "PZDL0106";
     public const string InvalidMergePredicate = "PZDL0107";
 
-    /// <summary>An output option this connector cannot act on — an unrecognized name, a value of the
-    /// wrong shape, or one outside the range delta-rs accepts. Offline config, not a runtime write
-    /// failure: it is decided from the OutputSpec alone, before anything is opened, so it belongs in
-    /// this family rather than alongside PZDL0404's storage-layer causes.</summary>
+    /// <summary>A write option this connector cannot act on — an unrecognized name, a value of the
+    /// wrong shape or outside the range delta-rs accepts, or a <c>strategy:</c> it does not implement.
+    /// Offline config, not a runtime write failure: every cause is decided from the OutputSpec alone,
+    /// before anything is opened, so they belong here rather than alongside PZDL0404's storage-layer
+    /// causes, which a reader hitting one of these has no way to act on.</summary>
     public const string InvalidWriteOption = "PZDL0108";
 
     // Read.

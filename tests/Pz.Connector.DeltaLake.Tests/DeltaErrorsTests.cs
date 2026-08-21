@@ -190,6 +190,7 @@ public class DeltaErrorsTests
         var thrown = Assert.Throws<OperationCanceledException>(() => DeltaErrors.Translate(cancelled, "insert", []));
         Assert.Same(cancelled, thrown);
     }
+
     [Fact]
     public void Translate_never_leaks_the_rows_delta_rs_previews_on_a_validation_failure()
     {
@@ -233,6 +234,24 @@ public class DeltaErrorsTests
     }
 
     [Fact]
+    public void Translate_redacts_data_under_a_recognized_marker_that_is_not_an_ascii_table()
+    {
+        // The marker stage carries this one alone. Every other data test here happens to embed an ASCII
+        // box table, which the box stripper catches independently — so without this the marker stage
+        // could be deleted with the whole suite staying green. Anything delta-rs renders under that
+        // marker in some other shape (Unicode box glyphs, a flat key=value line) is data all the same.
+        var raw = new DeltaLakeException(
+            "Generic DeltaTable error: External error: Invalid data found: 1 rows failed validation check.\n" +
+            "Preview of invalid data: id=777 amt=31337.5", 1);
+
+        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("777", ex.Message);
+        Assert.DoesNotContain("31337.5", ex.Message);
+        Assert.Contains("1 rows failed validation check", ex.Message);
+    }
+
+    [Fact]
     public void Translate_strips_a_row_table_even_when_the_marker_above_it_is_not_recognized()
     {
         // Belt and braces: an enumeration of the markers delta-rs uses today rots the moment upstream
@@ -253,7 +272,7 @@ public class DeltaErrorsTests
     }
 
     [Fact]
-    public void Translate_still_redacts_a_credential_that_follows_a_row_preview()
+    public void Translate_still_redacts_a_credential_that_precedes_a_row_preview()
     {
         // The data patterns run first and truncate to end-of-message, so a credential could only be
         // missed if it sat BEFORE the preview — this pins that the two stages compose.
@@ -266,5 +285,4 @@ public class DeltaErrorsTests
         Assert.DoesNotContain("hunter2", ex.Message);
         Assert.DoesNotContain("777", ex.Message);
     }
-
 }

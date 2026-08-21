@@ -62,7 +62,7 @@ internal sealed class DeltaWriteSession(
                     break;
 
                 default:
-                    throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
+                    throw DeltaErrors.Fail(DeltaErrors.InvalidWriteOption,
                         $"output '{output}': unsupported write strategy '{options.Mode}'",
                         "use strategy: append, replace, or merge");
             }
@@ -178,7 +178,7 @@ internal sealed class DeltaWriteSession(
     /// through <c>catch (PzConnectorException)</c>, and an uncoded exception on a reachable path would
     /// escape as a fatal with no output name and no next step.</summary>
     private Task MergeAsync(CancellationToken ct) =>
-        throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
+        throw DeltaErrors.Fail(DeltaErrors.InvalidWriteOption,
             $"output '{output}': strategy 'merge' is not implemented by this connector yet",
             "use strategy: append or replace, or pin a connector version whose release notes list merge");
 

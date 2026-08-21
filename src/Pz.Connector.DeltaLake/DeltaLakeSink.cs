@@ -292,7 +292,7 @@ internal sealed class DeltaLakeSink : ISink
         // that merge does not exist yet.
         if (options.Mode == "merge")
         {
-            throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
+            throw DeltaErrors.Fail(DeltaErrors.InvalidWriteOption,
                 $"output '{spec.Output}': strategy 'merge' is not implemented by this connector yet",
                 "use strategy: append or replace, or pin a connector version whose release notes list merge");
         }
