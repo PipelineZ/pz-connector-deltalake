@@ -284,6 +284,14 @@ internal sealed class DeltaLakeSink : ISink
                 "correct 'keys' to name columns the pipeline actually selects");
         }
 
+        if (spec.Mode == "merge")
+        {
+            // Before the location is even resolved: a key type the duplicate-key resolver cannot
+            // compare is a configuration error, and a configuration error must not open, create or
+            // touch a table.
+            DeltaMergeDedup.AssertResolvableKeys(schema, options.Keys, spec.Output);
+        }
+
         var location = DeltaLocation.Resolve(
             this.config.GetString("root") ?? string.Empty, spec.Output,
             spec.Options.TryGetValue("path", out var p) ? p?.ToString() : null);

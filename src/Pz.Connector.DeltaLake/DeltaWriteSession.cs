@@ -234,7 +234,11 @@ internal sealed class DeltaWriteSession(
 
         await this.WidenAsync(ct).ConfigureAwait(false);
 
-        var payload = this.buffered.ToArray();
+        // Resolved AFTER the statement is built and the widening committed, and it must stay there:
+        // the resolver returns SLICES that share the buffered batches' memory, so nothing between here
+        // and the merge may dispose the buffer. It is also the last step before the call, which is
+        // where a reader looking for what delta-rs actually receives will look.
+        var payload = DeltaMergeDedup.LastWriterWins(this.buffered, options.Keys).ToArray();
         try
         {
             await DeltaBigStack.RunAsync(() => table.MergeAsync(sql, payload, schema, ct)).ConfigureAwait(false);

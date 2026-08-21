@@ -87,6 +87,31 @@ new key entirely under the guarded one. Losing a row without a word is a worse o
 one that shows up in the table, so the connector emits the plain form for every predicate and this
 page tells you the consequence instead.
 
+### The same key twice in one write
+
+A write may name the same merge key more than once — a pipeline's `SELECT` is not deduplicated, so it
+is an ordinary input shape. **The last row for a key is the one that lands.** Rows are resolved to one
+per key before the `MERGE` statement runs, so the table ends up with exactly one row per key regardless
+of how many the write carried.
+
+This is the merge contract the rest of pz implements (its postgres and sql server sinks resolve the
+same repeat in SQL), and it is not something a raw Delta `MERGE` can express. Its `ON` clause matches
+the *target* against the source, so two source rows for one key are two independent matches: if the
+key is already in the table delta-rs refuses the whole statement, and if it is **not**, both rows fall
+to `WHEN NOT MATCHED` and both are inserted — one commit, no error, and a duplicate of a key the output
+declared unique.
+
+`PZDL0402` therefore no longer reports a repeat in *your* write. It now reports a repeat in the
+**table**: two rows already sitting there for one key, which an older run or another writer can leave
+behind. Remove them from the table; the write's own input is already resolved by the time the merge
+runs.
+
+**`PZDL0305`** refuses a merge key whose type cannot be compared row to row — a list, struct or map
+column. Without a comparison there is no way to tell a repeat from two distinct keys, and an unresolved
+repeat is a silently duplicated row rather than an error, so the key is refused at the start of the
+write instead. Use a scalar key — a number, string, boolean, date or timestamp — and derive it in the
+pipeline SQL if the source column is nested.
+
 ### Values a merge key cannot carry
 
 A merge is refused, with `PZDL0405`, when a key column holds a value that cannot match itself, so that

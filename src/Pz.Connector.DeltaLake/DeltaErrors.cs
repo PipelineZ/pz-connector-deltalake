@@ -55,6 +55,12 @@ internal static class DeltaErrors
     /// delta-rs directly and never build SQL from it.</summary>
     public const string UnquotableColumnName = "PZDL0304";
 
+    /// <summary>A merge key whose Arrow type the duplicate-key resolver cannot compare row to row.
+    /// Refused at BeginWriteAsync rather than at commit: without a comparison there is no way to tell
+    /// whether one write names the same key twice, and an unresolved repeat is a silently duplicated
+    /// row rather than an error.</summary>
+    public const string UnresolvableMergeKeyType = "PZDL0305";
+
     // Write, runtime.
     public const string CommitConflict = "PZDL0401";
     public const string DuplicateMergeKeys = "PZDL0402";
@@ -85,7 +91,8 @@ internal static class DeltaErrors
         UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, KeysOverlapPartitions, VersionOnWrite,
         CalendarTokenInReadPath, InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
         SchemaMismatch,
-        UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, CommitConflict, DuplicateMergeKeys,
+        UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, UnresolvableMergeKeyType,
+        CommitConflict, DuplicateMergeKeys,
         UnsafeConcurrentS3,
         WriteFailed, UnmatchableMergeKey, UnusablePartitionValue, UnsupportedProtocol,
     ];
@@ -245,11 +252,17 @@ internal static class DeltaErrors
         if (raw.Contains(DuplicateMergeMarker, StringComparison.OrdinalIgnoreCase))
         {
             var keys = mergeKeys.Count == 0 ? "the merge keys" : string.Join(", ", mergeKeys);
+            // This connector resolves a repeated key in its own input before the statement runs
+            // (DeltaMergeDedup), so reaching here means the multiplicity came from somewhere the
+            // resolver cannot see -- the TARGET holding two rows for one key, which an earlier
+            // silently-duplicating write or another writer can leave behind. The next step therefore
+            // names the table, not the pipeline: telling the author to deduplicate their own SELECT
+            // would send them to look at input that is already unique by the time delta-rs sees it.
             return Fail(DuplicateMergeKeys,
-                $"the incoming batch contains more than one row per merge key ({keys}), so the merge cannot " +
-                "decide which row wins",
-                "deduplicate upstream — for example add a qualify/row_number filter in the pipeline SQL so " +
-                "each key appears once", ex);
+                $"the table being written into holds more than one row per merge key ({keys}), so the " +
+                "merge cannot decide which row to update",
+                "remove the duplicate rows from the table — this write's own input is already resolved " +
+                "to one row per key before the merge runs", ex);
         }
 
         // Write operations only: the same message reaches a READ of a table some earlier write already

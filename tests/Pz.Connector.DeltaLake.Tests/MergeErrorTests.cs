@@ -146,25 +146,28 @@ public class MergeErrorTests
     }
 
     [Fact]
-    public async Task Duplicate_source_keys_produce_the_mapped_pz_error_not_a_raw_datafusion_string()
+    public async Task Duplicate_source_keys_resolve_last_writer_wins_instead_of_failing_the_write()
     {
+        // This used to be a refusal (PZDL0402, "deduplicate upstream"), and the refusal was only half
+        // real: delta-rs raises that error when the repeated key ALREADY EXISTS in the target, and
+        // says nothing at all when it does not -- the same input then committed two rows for one key,
+        // silently. Resolving the repeat before the statement runs closes the silent half and makes
+        // this connector agree with the merge contract the rest of the ecosystem implements: the LAST
+        // row for a key is the one that lands. MergeDuplicateKeyTests carries the full shape.
         var dir = TempDir("pz-delta-dupkeys");
         await DeltaTestTable.CreateLocalAsync(dir, rows: 10);
         await using var sink = await OpenSink(dir);
 
-        await using var s = await sink.BeginWriteAsync(Merge(["id"]), DeltaTestTable.Schema, default);
-        await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts(
-            [(5, "2026-01-06", 1.0), (5, "2026-01-06", 2.0), (5, "2026-01-06", 3.0)]), default);
+        await using (var s = await sink.BeginWriteAsync(Merge(["id"]), DeltaTestTable.Schema, default))
+        {
+            await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts(
+                [(5, "2026-01-06", 1.0), (5, "2026-01-06", 2.0), (5, "2026-01-06", 3.0)]), default);
+            await s.CommitAsync(default);
+        }
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
-        Assert.Contains(DeltaErrors.DuplicateMergeKeys, ex.Message);
-        Assert.Contains("id", ex.Message);
-        Assert.Contains("deduplicate", ex.Message, StringComparison.OrdinalIgnoreCase);
-
-        // The generated statement is not a diagnostic the user can act on, and it carries partition
-        // literals, which are their data.
-        Assert.DoesNotContain("WHEN MATCHED", ex.Message);
-        Assert.False(ex.IsTransient);
+        var rows = await DeltaReader.RowsAsync(Path.Combine(dir, "orders"));
+        Assert.Equal(10, rows.Count);
+        Assert.Equal(3.0, rows.Single(r => r.Id == 5).Amt);
     }
 
     [Fact]
