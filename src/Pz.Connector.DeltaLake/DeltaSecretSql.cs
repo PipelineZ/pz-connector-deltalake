@@ -17,8 +17,11 @@ namespace Pz.Connector.DeltaLake;
 /// creation order. Left unscoped, a project with a prod lake and a staging lake would have whichever
 /// <c>pz_delta_*</c> name sorts first silently authenticate every S3 (or Azure) delta read in the run
 /// — the other connection's credentials are simply never used, and it surfaces as a bucket-level 403
-/// naming nothing. Every secret this file builds therefore also carries <c>scope &lt;root&gt;</c>: the
-/// name disambiguates the statement, the scope disambiguates which credentials DuckDB actually picks.
+/// naming nothing. Every secret this file builds therefore also carries a <c>scope</c> derived from
+/// <c>root</c> (trailing-slash normalized — DuckDB's scope match is a plain string prefix match,
+/// so an unnormalized root would still cross-wire against a sibling root that merely shares its
+/// string prefix, e.g. <c>s3://data-lake</c> against <c>s3://data-lake-archive</c>): the name
+/// disambiguates the statement, the scope disambiguates which credentials DuckDB actually picks.
 /// Secret names are internal — nothing in plan.json, Reason strings, or events carries them, and no
 /// credential value ever leaves this file.</summary>
 internal static class DeltaSecretSql
@@ -105,7 +108,7 @@ internal static class DeltaSecretSql
             parts.Add($"use_ssl {(config.GetBool("use_ssl", true) ? "true" : "false")}");
         }
 
-        parts.Add($"scope {Literal(root)}");
+        parts.Add($"scope {Scope(root)}");
 
         return $"create or replace secret {name} ({string.Join(", ", parts)})";
     }
@@ -116,7 +119,7 @@ internal static class DeltaSecretSql
         if (!string.IsNullOrEmpty(connectionString))
         {
             return $"create or replace secret {name} (type azure, provider config, " +
-                   $"connection_string {Literal(connectionString)}, scope {Literal(root)})";
+                   $"connection_string {Literal(connectionString)}, scope {Scope(root)})";
         }
 
         var account = config.GetString("account_name");
@@ -129,7 +132,7 @@ internal static class DeltaSecretSql
             return $"create or replace secret {name} (type azure, provider service_principal, " +
                    $"tenant_id {Literal(tenant)}, client_id {Literal(clientId)}, " +
                    $"client_secret {Literal(clientSecret)}, account_name {Literal(account)}, " +
-                   $"scope {Literal(root)})";
+                   $"scope {Scope(root)})";
         }
 
         // DuckDB's azure secret type has no discrete account_key parameter — confirmed against a real
@@ -145,7 +148,7 @@ internal static class DeltaSecretSql
                 $"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={accountKey};" +
                 "EndpointSuffix=core.windows.net";
             return $"create or replace secret {name} (type azure, provider config, " +
-                   $"connection_string {Literal(connectionStringFromKey)}, scope {Literal(root)})";
+                   $"connection_string {Literal(connectionStringFromKey)}, scope {Scope(root)})";
         }
 
         // account_name alone, with no key and no service-principal quartet, is the managed-identity /
@@ -159,7 +162,7 @@ internal static class DeltaSecretSql
         if (!string.IsNullOrEmpty(account))
         {
             return $"create or replace secret {name} (type azure, provider credential_chain, " +
-                   $"account_name {Literal(account)}, scope {Literal(root)})";
+                   $"account_name {Literal(account)}, scope {Scope(root)})";
         }
 
         return null;
@@ -175,6 +178,13 @@ internal static class DeltaSecretSql
 
     // Single-quote doubling: the one escaping rule that keeps a credential from ending its own literal.
     private static string Literal(string value) => $"'{value.Replace("'", "''")}'";
+
+    // DuckDB's secret SCOPE match is a plain string prefix match, not path-boundary-aware: an
+    // unnormalized scope of "s3://w/d" also matches the unrelated sibling "s3://w/d2/...", reopening
+    // the same cross-wiring Finding 1 closed, just narrower (confirmed against a real DuckDB 1.5.5).
+    // A trailing slash makes the prefix match only this root and its own subpaths — reuses
+    // DeltaLocation's trim so root and scope agree on one rule rather than two.
+    private static string Scope(string root) => Literal(DeltaLocation.TrimTrailingSlash(root) + "/");
 
     private static string Sanitize(string name)
     {

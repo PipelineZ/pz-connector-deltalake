@@ -50,15 +50,20 @@ internal static class DeltaLocation
         // An absolute override wins outright: the user named a table that does not live under root.
         if (path is not null && (HasScheme(path) || Path.IsPathRooted(path)))
         {
-            return Trim(path);
+            return TrimTrailingSlash(path);
         }
 
-        var baseUri = Trim(root);
+        var baseUri = TrimTrailingSlash(root);
         var suffix = string.IsNullOrEmpty(path) ? entity : path.Trim('/');
         return $"{baseUri}/{suffix}";
     }
 
-    private static bool HasScheme(string value) => value.Contains("://", StringComparison.Ordinal);
+    /// <summary>The one trailing-slash rule for a root/path fragment. Internal (not private) because
+    /// DeltaSecretSql reuses it to normalize a SCOPE value — DuckDB's secret scope match is a plain
+    /// string prefix match, not path-boundary-aware, so an unnormalized root and its own trailing-slash
+    /// form must agree or two roots that are string prefixes of each other (s3://data-lake vs.
+    /// s3://data-lake-archive) cross-wire exactly like an unscoped secret would.</summary>
+    internal static string TrimTrailingSlash(string value) => value.TrimEnd('/');
 
-    private static string Trim(string value) => value.TrimEnd('/');
+    private static bool HasScheme(string value) => value.Contains("://", StringComparison.Ordinal);
 }

@@ -49,7 +49,7 @@ public class DeltaSecretSqlTests
         Assert.Equal(
             $"create or replace secret {name} (type s3, key_id 'AK', secret 'SK', session_token 'TOK', " +
             "region 'eu-west-1', endpoint 's3.eu-west-1.amazonaws.com', url_style 'path', use_ssl true, " +
-            "scope 's3://w/d')",
+            "scope 's3://w/d/')",
             SoleSecret(stmts));
     }
 
@@ -83,7 +83,7 @@ public class DeltaSecretSqlTests
         var name = DeltaSecretSql.SecretName("lake");
         Assert.Equal(
             $"create or replace secret {name} (type s3, provider credential_chain, " +
-            "endpoint 'minio:9000', url_style 'path', use_ssl false, scope 's3://w/d')",
+            "endpoint 'minio:9000', url_style 'path', use_ssl false, scope 's3://w/d/')",
             SoleSecret(stmts));
     }
 
@@ -101,7 +101,37 @@ public class DeltaSecretSqlTests
     {
         var stmts = DeltaSecretSql.SetupStatements(
             Cfg(("root", "s3://prod-bucket/lake"), ("access_key_id", "AK"), ("secret_access_key", "SK")), "prod");
-        Assert.Contains("scope 's3://prod-bucket/lake'", SoleSecret(stmts));
+        Assert.Contains("scope 's3://prod-bucket/lake/'", SoleSecret(stmts));
+    }
+
+    [Fact]
+    public void The_scope_is_trailing_slash_normalized_so_it_does_not_match_a_sibling_root_sharing_its_prefix()
+    {
+        // DuckDB's SCOPE match is a plain string prefix match, not path-boundary-aware — confirmed
+        // against a real DuckDB 1.5.5: an unnormalized scope of "s3://data-lake" was also selected by
+        // which_secret() for the unrelated sibling "s3://data-lake-archive/...", reopening exactly the
+        // cross-wiring Finding 1 closed, just narrower (a shared string prefix instead of no scope at
+        // all). A trailing slash on the scope value is what excludes the sibling while still matching
+        // the root's own subpaths (confirmed: "s3://w/d/" still matched "s3://w/d/_delta_log/...").
+        var sql = SoleSecret(DeltaSecretSql.SetupStatements(
+            Cfg(("root", "s3://data-lake"), ("access_key_id", "AK"), ("secret_access_key", "SK")), "lake"));
+
+        Assert.Contains("scope 's3://data-lake/'", sql);
+
+        // The property that actually matters, pinned directly: the normalized scope must not be a
+        // string prefix of a sibling root that merely shares the unnormalized root as a substring.
+        const string siblingPath = "s3://data-lake-archive/tbl/x.parquet";
+        Assert.False(siblingPath.StartsWith("s3://data-lake/", StringComparison.Ordinal));
+        Assert.StartsWith("s3://data-lake", siblingPath, StringComparison.Ordinal); // true pre-fix — the bug
+    }
+
+    [Fact]
+    public void A_root_that_already_ends_with_a_slash_does_not_get_a_doubled_scope_slash()
+    {
+        var sql = SoleSecret(DeltaSecretSql.SetupStatements(
+            Cfg(("root", "s3://w/d/"), ("access_key_id", "AK"), ("secret_access_key", "SK")), "lake"));
+        Assert.Contains("scope 's3://w/d/'", sql);
+        Assert.DoesNotContain("s3://w/d//", sql);
     }
 
     [Fact]
@@ -120,8 +150,8 @@ public class DeltaSecretSqlTests
             Cfg(("root", "s3://staging-bucket/lake"), ("access_key_id", "AK"), ("secret_access_key", "SK")),
             "staging"));
 
-        Assert.Contains("scope 's3://prod-bucket/lake'", prod);
-        Assert.Contains("scope 's3://staging-bucket/lake'", staging);
+        Assert.Contains("scope 's3://prod-bucket/lake/'", prod);
+        Assert.Contains("scope 's3://staging-bucket/lake/'", staging);
     }
 
     [Fact]
@@ -130,7 +160,7 @@ public class DeltaSecretSqlTests
         var sql = SoleSecret(DeltaSecretSql.SetupStatements(
             Cfg(("root", "s3://w/d'; drop secret x; --"), ("access_key_id", "AK"), ("secret_access_key", "SK")),
             "lake"));
-        Assert.Contains("scope 's3://w/d''; drop secret x; --'", sql);
+        Assert.Contains("scope 's3://w/d''; drop secret x; --/'", sql);
     }
 
     [Fact]
@@ -204,7 +234,7 @@ public class DeltaSecretSqlTests
         var name = DeltaSecretSql.SecretName("lake");
         Assert.Equal(
             $"create or replace secret {name} (type azure, provider credential_chain, " +
-            "account_name 'myacct', scope 'az://fs/d')",
+            "account_name 'myacct', scope 'az://fs/d/')",
             SoleSecret(stmts));
     }
 
