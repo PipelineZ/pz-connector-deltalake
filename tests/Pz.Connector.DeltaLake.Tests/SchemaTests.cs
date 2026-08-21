@@ -299,4 +299,66 @@ public class SchemaTests
         // along the way.
         Assert.Same(versionFailure, ex.InnerException);
     }
+
+    [Fact]
+    public async Task A_throwing_Dispose_does_not_replace_the_original_LoadVersionAsync_failure()
+    {
+        // Pins the deliberate swallow in LoadAsync's catch-dispose-rethrow: Dispose() failing (low
+        // likelihood given a real SafeHandle-backed ITable, but not impossible) must not surface
+        // INSTEAD of the LoadVersionAsync failure the user actually needs to see. Without this test,
+        // "simplifying" the inner try/catch back to a bare disposable.Dispose() call reintroduces the
+        // bug with every other test in this file still green -- OnDispose never throws anywhere else.
+        var versionFailure = new DeltaLakeException("version 99 not found", 1);
+        var table = new FakeDeltaTable
+        {
+            OnLoadVersionAsync = (_, _) => throw versionFailure,
+            OnDispose = () => throw new InvalidOperationException("dispose boom"),
+        };
+        var engine = new FakeDeltaEngine { OnLoadTableAsync = (_, _) => Task.FromResult<ITable>(table) };
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() =>
+            DeltaStorageOptions.LoadAsync(
+                engine, "s3://w/d/orders", Cfg(("root", "s3://w/d")), version: 0L, dataset: "orders", ct: default));
+
+        Assert.Same(versionFailure, ex.InnerException);
+    }
+
+    [Fact]
+    public async Task LoadAsync_never_lets_its_own_ConfigureAwaitFalse_regression_land_silently()
+    {
+        // This is the exact historical bug DeltaBigStack's doc comment names: DeltaStorageOptions.
+        // LoadAsync's delegate once ended its two internal awaits in .ConfigureAwait(false), which
+        // opts back OUT of the pump DeltaBigStack.RunAsync installs -- the second delta-rs call then
+        // resumes on a default-stack pool thread instead of "pz-deltalake". DeltaBigStackTests pins
+        // the gate generically, but nothing pinned THIS delegate specifically, and the disposal test
+        // above cannot catch it either: both fakes there complete synchronously, so the delegate never
+        // actually yields and the pump is never exercised.
+        //
+        // Making OnLoadTableAsync complete asynchronously (a real await, not an already-completed
+        // Task.FromResult) forces a genuine resumption; OnLoadVersionAsync then records which thread
+        // it runs on. If either internal await in LoadAsync's delegate ever regains
+        // .ConfigureAwait(false), this fails with ".NET TP Worker" instead of "pz-deltalake".
+        string? loadVersionAsyncThreadName = null;
+        var table = new FakeDeltaTable
+        {
+            OnLoadVersionAsync = (_, _) =>
+            {
+                loadVersionAsyncThreadName = Thread.CurrentThread.Name;
+                return Task.CompletedTask;
+            },
+        };
+        var engine = new FakeDeltaEngine
+        {
+            OnLoadTableAsync = async (_, _) =>
+            {
+                await Task.Yield();
+                return table;
+            },
+        };
+
+        await DeltaStorageOptions.LoadAsync(
+            engine, "s3://w/d/orders", Cfg(("root", "s3://w/d")), version: 0L, dataset: "orders", ct: default);
+
+        Assert.Equal("pz-deltalake", loadVersionAsyncThreadName);
+    }
 }

@@ -29,8 +29,8 @@ namespace Pz.Connector.DeltaLake;
 /// — every plain <c>await</c> inside then captures this context and is pumped back onto the same OS
 /// thread, no matter which thread pool worker actually completed the antecedent task.
 ///
-/// This guarantee has three known edges — read them before writing a delegate against this gate,
-/// because none of the three is enforced by anything, and a partial guarantee that reads as total is
+/// This guarantee has four known edges — read them before writing a delegate against this gate,
+/// because none of the four is enforced by anything, and a partial guarantee that reads as total is
 /// worse than no guarantee at all:
 /// <list type="bullet">
 /// <item><description><c>ConfigureAwait(false)</c> inside a delegate still escapes the gate. Nothing
@@ -51,6 +51,15 @@ namespace Pz.Connector.DeltaLake;
 /// there is no tail for the library's own internal continuation to run on a pool thread with. Moving
 /// any deep-recursion work behind an async delta-rs API in a future task means re-examining this
 /// edge, not assuming the gate still covers it.</description></item>
+/// <item><description>Never fire-and-forget a delta-rs call from inside a delegate — start it and
+/// return without awaiting it first. The pump only pumps continuations while the delegate's own task
+/// is still running; once the delegate returns, <c>Complete()</c> closes the queue, and the guarded
+/// fallback in <c>SingleThreadSynchronizationContext.Post</c> re-routes that orphan's continuation to
+/// <c>ThreadPool.UnsafeQueueUserWorkItem</c> — a DEFAULT-STACK pool thread. A fire-and-forget delta-rs
+/// call (a write path's "one insert per flushed generation" is exactly the shape this type's own doc
+/// above anticipates) that outlives its delegate reopens the uncatchable stack overflow this whole
+/// type exists to prevent, on the one path that survives the process-abort guard by design rather than
+/// crashing outright.</description></item>
 /// </list>
 /// </summary>
 internal static class DeltaBigStack
@@ -159,6 +168,12 @@ internal static class DeltaBigStack
                 // reappear here for an orphaned continuation instead. Falling back to
                 // ThreadPool.UnsafeQueueUserWorkItem reproduces the ordinary pre-pump behavior for
                 // that one continuation (default-stack pool thread) rather than crashing the process.
+                //
+                // This catch is narrowed to InvalidOperationException, not (also) ObjectDisposedException,
+                // ONLY because the queue is never Dispose()d -- see Complete() below. If that decision
+                // is ever reversed, Add() can also throw ObjectDisposedException on this exact path,
+                // and this catch must widen to cover it too, or an orphaned continuation goes back to
+                // being an uncatchable process kill.
                 ThreadPool.UnsafeQueueUserWorkItem(s => d(s), state);
             }
         }
@@ -184,6 +199,12 @@ internal static class DeltaBigStack
         // NOT safe to call concurrently with Add(), and an orphaned fire-and-forget continuation
         // (see Post above) can legitimately call Add() after RunAsync<T> has already returned --
         // disposing here would trade a nonexistent leak for a real, if rare, race.
+        //
+        // This decision is load-bearing for Post's catch clause, not just for this method: Post
+        // catches only InvalidOperationException (what a completed-but-not-disposed queue throws from
+        // Add()), not ObjectDisposedException. Reversing this decision to dispose the queue after all
+        // means Post's catch must widen to cover ObjectDisposedException too, or an orphaned
+        // continuation's Add() call goes back to being an uncatchable process kill.
         public void Complete() => this.queue.CompleteAdding();
     }
 }
