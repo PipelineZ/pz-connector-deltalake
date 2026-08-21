@@ -56,6 +56,91 @@ internal static class DeltaReader
             }
         });
 
+    /// <summary>The whole table as Arrow batches, ordered by its first column, decoded through
+    /// delta-rs so the caller needs nothing off the network — <see cref="DuckDbReader.BatchesAsync"/> is
+    /// the same read through the OTHER engine, and depends on an extension download.
+    ///
+    /// Unlike <see cref="RowsAsync"/> this decodes a NULL in any column: it appends a real Arrow null
+    /// rather than squeezing the value into a non-nullable tuple field, which is what made RowsAsync
+    /// unable to read a table with a null partition value.</summary>
+    public static Task<IReadOnlyList<RecordBatch>> BatchesAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            // No ConfigureAwait(false) on this delegate's own awaits — see RowsAsync above.
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                ArrowRowsetBuilder? rowset = null;
+                var query = new SelectQuery("select * from tbl order by 1") { TableAlias = "tbl" };
+                await foreach (var batch in table.QueryAsync(query, default))
+                {
+                    using (batch)
+                    {
+                        rowset ??= Declare(batch);
+                        for (var row = 0; row < batch.Length; row++)
+                        {
+                            for (var col = 0; col < batch.ColumnCount; col++)
+                            {
+                                rowset.Append(col, Scalar(batch.Column(col), row));
+                            }
+
+                            rowset.CompleteRow();
+                        }
+                    }
+                }
+
+                return rowset?.Build() is { } built ? (IReadOnlyList<RecordBatch>)[built] : [];
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
+    private static ArrowRowsetBuilder Declare(RecordBatch batch)
+    {
+        var rowset = new ArrowRowsetBuilder();
+        for (var col = 0; col < batch.ColumnCount; col++)
+        {
+            rowset.DeclareColumn(batch.Schema.FieldsList[col].Name, ClrTypeOf(batch.Column(col)));
+        }
+
+        return rowset;
+    }
+
+    /// <summary>Which CLR type a column decodes to. Driven by the ARRAY that arrived rather than by the
+    /// table's declared schema: DataFusion picks the encoding (a partition column arrives
+    /// dictionary-encoded, an ordinary string column as a view), and the encoding is what determines
+    /// how a value must be read back out.</summary>
+    private static Type ClrTypeOf(IArrowArray array) => array switch
+    {
+        Int64Array => typeof(long),
+        DoubleArray => typeof(double),
+        StringArray or StringViewArray or LargeStringArray => typeof(string),
+        DictionaryArray d => ClrTypeOf(d.Dictionary),
+        _ => throw new NotSupportedException($"unexpected array type {array.GetType().Name}"),
+    };
+
+    private static object? Scalar(IArrowArray array, int index)
+    {
+        if (array.IsNull(index))
+        {
+            return null;
+        }
+
+        return array switch
+        {
+            Int64Array a => a.GetValue(index),
+            DoubleArray a => a.GetValue(index),
+            // Every string encoding, including the dictionary-encoded shape a partition column takes.
+            _ => Text(array, index),
+        };
+    }
+
     /// <summary>delta-rs answers a query through DataFusion, whose string columns arrive in whichever
     /// encoding the plan produced: a StringViewArray for an ordinary column, and a dictionary-encoded
     /// array for a PARTITION column, whose values live in directory names rather than in the data

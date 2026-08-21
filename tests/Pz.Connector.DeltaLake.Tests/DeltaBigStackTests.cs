@@ -161,4 +161,33 @@ public class DeltaBigStackTests
                 $"iteration {i}: gate thread '{thread.Name}' did not terminate within 5s of returning its result");
         }
     }
+
+    /// <summary>A FIELD INITIALIZER that blocks on the gate still gets the big stack, and cannot
+    /// deadlock. This is the shape <see cref="LocalLakeFixture"/> uses to seed a Delta table from a
+    /// property getter an acceptance base class reads synchronously, so it is pinned here rather than
+    /// assumed: <c>RunAsync</c> starts a thread it creates itself and completes the returned task from
+    /// that thread, so the blocking caller is never the thread the work needs — the classic
+    /// sync-over-async deadlock has no way to form, whatever SynchronizationContext the caller is on
+    /// (xunit installs its own on the thread running this test, and therefore on the constructor
+    /// below).
+    ///
+    /// Reaching the assertions at all is the no-deadlock half of the proof; the thread name is the
+    /// other half, and it is the one that matters, because a block that quietly ran the delegate on the
+    /// caller's own default-sized stack would look identical from the outside until delta-kernel-rs
+    /// recursed deeply enough to kill the process.</summary>
+    [Fact]
+    public void Blocking_on_the_gate_from_a_constructor_still_runs_on_the_big_stack()
+    {
+        var caller = Thread.CurrentThread;
+        var probe = new BlocksInItsFieldInitializer();
+
+        Assert.NotSame(caller, probe.Observed);
+        Assert.Equal("pz-deltalake", probe.Observed.Name);
+    }
+
+    private sealed class BlocksInItsFieldInitializer
+    {
+        public Thread Observed { get; } =
+            DeltaBigStack.RunAsync(() => Task.FromResult(Thread.CurrentThread)).GetAwaiter().GetResult();
+    }
 }

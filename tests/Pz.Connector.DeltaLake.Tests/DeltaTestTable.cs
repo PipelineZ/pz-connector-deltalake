@@ -86,9 +86,14 @@ internal static class DeltaTestTable
     // DeltaBigStack's own doc comment) — a risk that applies just as much to a test helper calling
     // straight into the same native FFI as it does to production code.
     public static Task<string> CreateLocalAsync(string dir, long rows, string[]? partitionBy = null) =>
+        CreateAtAsync(Path.Combine(dir, "orders"), rows, partitionBy);
+
+    /// <summary>The general form: the table goes exactly where the caller says, rather than at a fixed
+    /// "orders" child of a directory. A fixture that seeds several entities under one root needs to
+    /// name each one; <see cref="CreateLocalAsync"/> is that call with the name it always used.</summary>
+    public static Task<string> CreateAtAsync(string location, long rows, string[]? partitionBy = null) =>
         DeltaBigStack.RunAsync(async () =>
         {
-            var location = Path.Combine(dir, "orders");
             using var engine = new DeltaEngine(EngineOptions.Default);
             var table = await engine.CreateTableAsync(
                 new TableCreateOptions(location, Schema) { PartitionBy = partitionBy ?? [], SaveMode = SaveMode.ErrorIfExists },
