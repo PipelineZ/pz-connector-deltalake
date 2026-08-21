@@ -21,7 +21,18 @@ namespace Pz.Connector.DeltaLake;
 /// so their element type is deliberately NOT recursed into below — DuckDB's Arrow export does not
 /// produce any of the three (LIST becomes <see cref="ArrowTypeId.List"/>, ARRAY becomes <see
 /// cref="ArrowTypeId.FixedSizeList"/>), so this is an accepted, documented gap rather than a silent
-/// one; closing it needs its own observed candidates first.</summary>
+/// one; closing it needs its own observed candidates first.
+///
+/// A DICTIONARY-encoded column returns TRUE here, and that is correct rather than an oversight, but the
+/// reason is worth writing down because it is not obvious. Called against raw delta-rs, a dictionary
+/// column writes fine as an ordinary column and fails the INSERT when delta-rs has to partition by it
+/// ("Error partitioning record batch: Missing partition column") — an uncoded failure that would seem
+/// to need a guard here. It does not: no write reaches it. Delta stores the column's value type, so the
+/// table's schema comes back utf8 where the batch said dictionary, and DeltaLakeSink's Reconcile refuses
+/// the write with PZDL0301 before a row is sent — measured through the sink, partitioned and not.
+/// Adding a partition-specific refusal on top would be dead code. The cost of Reconcile getting there
+/// first is that an ordinary dictionary column delta-rs WOULD accept is refused too; the remedy it
+/// names (cast the column in the pipeline SQL) is the right one either way.</summary>
 internal static class DeltaTypeSupport
 {
     public static bool IsWritable(IArrowType type) => type.TypeId switch

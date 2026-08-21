@@ -1,5 +1,6 @@
 using Apache.Arrow;
 using Apache.Arrow.Types;
+using Pz.Connectors.Abstractions;
 using Xunit;
 
 namespace Pz.Connector.DeltaLake.Tests;
@@ -381,7 +382,8 @@ public class MergeSafetyTests
         // is worth revisiting rather than being left as folklore.
         Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                schema, Opts(["id", "live"], ["live"]), [new PartitionFilter("live", ["true"])]));
+                schema, DeltaTestTable.ColumnsOf(schema),
+                Opts(["id", "live"], ["live"]), [new PartitionFilter("live", ["true"])]));
     }
 
     [Fact]
@@ -416,7 +418,8 @@ public class MergeSafetyTests
 
         var outcome = DeltaPartitionPredicate.Derive([batch], Opts(["id", "dt"], ["dt"]));
 
-        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), outcome.Filters);
+        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id", "dt"], ["dt"]), outcome.Filters);
         Assert.Contains("target.\"dt\" IN (", sql);
     }
 
@@ -623,6 +626,78 @@ public class MergeSafetyTests
             .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
             .Build();
         return new RecordBatch(schema, [id.Build(), dt.Build(), amt.Build()], 2);
+    }
+
+    [Fact]
+    public async Task A_row_whose_partition_value_changes_is_updated_not_duplicated()
+    {
+        // The reason the keys rule exists, run end to end rather than argued: partition_by = [dt],
+        // keys = [id] — dt is NOT a key, so the derivation must be skipped. If it were derived, the
+        // merge would look only in the NEW partition, find no match, and INSERT a second copy of id=1
+        // while the old one survived in the old partition. Both copies would be legitimate-looking
+        // rows and nothing would report a problem.
+        //
+        // This test and the one below go through the SINK, not through DeltaPartitionPredicate — the
+        // rest of this file asserts what the deriver returns, and these two assert what a real write
+        // session does with it.
+        var dir = Directory.CreateTempSubdirectory("pz-delta-moving").FullName;
+        await using var sink = await ((ISinkConnector)new DeltaLakeConnector())
+            .OpenAsync(new ConnectorConfig(new Dictionary<string, object?> { ["root"] = dir }), default);
+
+        var spec = new OutputSpec("lake", "orders", "merge", "fail_on_change",
+            new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } }) { Keys = ["id"] };
+
+        await using (var seed = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default))
+        {
+            await seed.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1, "2026-01-01", 10.0)]), default);
+            await seed.CommitAsync(default);
+        }
+
+        var move = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default);
+        await using (move)
+        {
+            await move.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1, "2026-06-30", 20.0)]), default);
+            await move.CommitAsync(default);
+        }
+
+        var rows = await DeltaReader.RowsAsync(Path.Combine(dir, "orders"));
+        Assert.Single(rows);
+        Assert.Equal(20.0, rows[0].Amt);
+        Assert.Equal("2026-06-30", rows[0].Dt);
+
+        // And the deriver recorded WHY it stood aside, naming the column and never the value. Nothing
+        // surfaces it yet — the connector ABI has no channel for a note — so this seam is the only
+        // place the reason is observable at all.
+        var typed = Assert.IsType<DeltaWriteSession>(move);
+        Assert.Contains("'dt'", typed.LastSkipReason!);
+        Assert.DoesNotContain("2026-06-30", typed.LastSkipReason!);
+    }
+
+    [SkippableFact]
+    public async Task Merge_cost_follows_the_partitions_the_write_touches_not_the_table()
+    {
+        // The property a user depends on: a merge into a large table costs what the partitions it
+        // touches cost, not what the table costs. Pinned here so that if it breaks it fails in this
+        // repository rather than becoming a support ticket.
+        //
+        // Which mechanism delivers it was measured rather than assumed, and the answer is not the one
+        // the plan assumed. delta-rs builds its OWN early filter from the source's partition values
+        // whenever the partition column is part of the join — which is exactly and only the case in
+        // which deriving one is sound. So the derived IN list is worth nothing measurable, and the
+        // second assertion pins that it at least costs nothing either. It stays as a hedge: delta-rs's
+        // early filter is an internal optimization with no stability contract, and the first assertion
+        // is what would catch it disappearing.
+        Skip.IfNot(TestEnvironment.RunSlowBenchmarks, "set PZDL_SLOW_TESTS=1 to run the merge cost regression");
+
+        var r = await MergeCostBench.RunAsync(tableRows: 2_000_000, sourceRows: 1_000);
+
+        Assert.Equal(5, r.Literals);
+        Assert.True(r.PartitionJoined * 4 < r.Unpruned,
+            $"a merge joined on the partition column ({r.PartitionJoined} ms over {r.Literals} of 200 " +
+            $"partitions) should be far cheaper than one that is not ({r.Unpruned} ms)");
+        Assert.True(r.Derived < (r.PartitionJoined * 2) + 50,
+            $"the derived IN list ({r.Derived} ms) must not cost more than leaving it out " +
+            $"({r.PartitionJoined} ms); deriving it took {r.DeriveMs} ms");
     }
 
     private static RecordBatch BinaryValued(string marker)

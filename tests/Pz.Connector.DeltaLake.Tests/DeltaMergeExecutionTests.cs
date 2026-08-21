@@ -32,11 +32,12 @@ public class DeltaMergeExecutionTests
 
     [Fact]
     public Task A_generated_merge_inserts_the_absent_key_and_leaves_every_other_row_alone() =>
-        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"]), null));
+        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id"]), null));
 
     [Fact]
     public Task A_generated_merge_with_a_composite_key_stays_narrow() =>
-        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"]), null));
+        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id", "dt"]), null));
 
     [Theory]
     [InlineData("target.dt >= '2026-01-01'")]
@@ -45,12 +46,13 @@ public class DeltaMergeExecutionTests
     [InlineData("target.dt LIKE '2026%'")]
     [InlineData("target.dt = 'a b' OR target.amt >= -1.5")]
     public Task An_accepted_merge_predicate_cannot_widen_the_on_clause(string predicate) =>
-        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        AssertNarrowAsync(DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id"], mergePredicate: predicate), null));
 
     [Fact]
     public Task A_derived_partition_filter_cannot_widen_the_on_clause() =>
         AssertNarrowAsync(DeltaMergeSql.Build(
-            DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]),
+            DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id", "dt"], ["dt"]),
             [new PartitionFilter("dt", ["'2026-01-01'", "'2026-01-02'"])]));
 
     [Fact]
@@ -170,7 +172,8 @@ public class DeltaMergeExecutionTests
         try
         {
             Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-                () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id", "a\"\"b"], ["a\"\"b"]), null));
+                () => DeltaMergeSql.Build(QuotedNameSchema, DeltaTestTable.ColumnsOf(QuotedNameSchema),
+                    Opts(["id", "a\"\"b"], ["a\"\"b"]), null));
 
             var control = await CreateTwoQuotedColumnsAsync(dir, ["a\"\"b"], "control");
             await MergeQuotedAsync(control, QuotedMerge(Resolves), QuotedNameRow("ONE-NEW", "TWO"));
@@ -215,7 +218,8 @@ public class DeltaMergeExecutionTests
             var location = await CreateTwoQuotedColumnsAsync(dir, [], "stale");
 
             Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-                () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id"]), null));
+                () => DeltaMergeSql.Build(QuotedNameSchema, DeltaTestTable.ColumnsOf(QuotedNameSchema),
+                    Opts(["id"]), null));
 
             await MergeQuotedAsync(
                 location,

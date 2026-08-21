@@ -14,13 +14,23 @@ internal sealed record PartitionFilter(string Column, IReadOnlyList<string> Lite
 /// The ON clause is the only thing that decides what a merge costs: it is what prunes the target scan.
 /// An unconstrained merge scans the whole table, so its cost grows with the TABLE, not the input.
 ///
-/// A user-supplied merge_predicate may only compare the output's own columns against literals. Function
-/// calls, casts, CASE and subqueries are refused — a deliberate limit, not an oversight: the predicate
-/// is interpolated into a statement handed to a SQL engine this connector does not own, and the
-/// vocabulary that engine accepts is not a vocabulary this connector can enumerate. A subquery is worse
-/// than merely unsupported there, because it aborts inside native code before any error can be raised
-/// and the merge call then never returns. Compute a derived value in the pipeline's own SQL and compare
-/// against a column here.</summary>
+/// A user-supplied merge_predicate may only compare named columns against literals — the output's own
+/// columns on the `source.` side, the existing table's on the `target.` side. Function calls, casts,
+/// CASE and subqueries are refused — a deliberate limit, not an oversight: the predicate is interpolated
+/// into a statement handed to a SQL engine this connector does not own, and the vocabulary that engine
+/// accepts is not a vocabulary this connector can enumerate. A subquery is worse than merely unsupported
+/// there, because it aborts inside native code before any error can be raised and the merge call then
+/// never returns. Compute a derived value in the pipeline's own SQL and compare against a column here.
+///
+/// THREE REFUSALS IN THIS CONNECTOR SHARE ONE PREMISE, AND MUST BE RE-DECIDED TOGETHER: the doubled
+/// quote inside a merge_predicate literal (<see cref="Inspect"/>), the quote or backslash inside a
+/// derived partition value (<see cref="DeltaPartitionPredicate"/>'s Render), and the '"' inside a column
+/// name (<see cref="RefuseUnquotableNames"/>). All three rest on one measured behaviour: this library's
+/// merge path collapses a run of doubled quotes one level further than its own SELECT path does, so a
+/// value or name written with an escape compares as a different value or resolves to a different column
+/// — silently, as a duplicated row or a stale column. Each has an execution test against real delta-rs,
+/// so a version bump that fixes the underlying behaviour fails all three TOGETHER. That is deliberate.
+/// Do not relax one because its test started failing; they are a set.</summary>
 internal static class DeltaMergeSql
 {
     /// <summary>A merge_predicate must be a predicate, not an arbitrary SQL tail. Statement
@@ -86,8 +96,15 @@ internal static class DeltaMergeSql
     private static readonly Regex NumericLiteral = new(
         @"\A[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?\z", RegexOptions.Compiled);
 
+    /// <summary>Builds the statement. <paramref name="schema"/> is the schema of the batch being
+    /// written — the `source` side, and the only side whose columns this generator renders into the ON,
+    /// SET and INSERT clauses. <paramref name="targetColumns"/> is the EXISTING TABLE's column list,
+    /// used for one thing only: resolving a <c>target.</c>-qualified name in a user's merge_predicate.
+    /// The two lists are not interchangeable and neither may stand in for the other — see
+    /// <see cref="Inspect"/> for what each of them being wrong would cost.</summary>
     public static string Build(
-        Schema schema, DeltaWriteOptions options, IReadOnlyList<PartitionFilter>? partitionFilters)
+        Schema schema, IReadOnlyList<string> targetColumns, DeltaWriteOptions options,
+        IReadOnlyList<PartitionFilter>? partitionFilters)
     {
         var columns = schema.FieldsList.Select(f => f.Name).ToList();
         var keys = options.Keys;
@@ -112,19 +129,22 @@ internal static class DeltaMergeSql
                 || predicate.AsSpan().IndexOfAny(Unmodelled) >= 0
                 || IsBlank(predicate)
                 ? PredicateVerdict.Malformed
-                : Inspect(predicate, columns);
+                : Inspect(predicate, columns, targetColumns);
 
             if (verdict is PredicateVerdict.Unqualified)
             {
-                // Every column this connector will accept by name is a column of the batch being
-                // written, so it exists on BOTH sides of the merge and an unqualified reference to it
-                // is ambiguous -- measured, not assumed: delta-rs answers one with "Ambiguous reference
-                // to unqualified field". It can never resolve, so it is refused here with a coded
-                // error rather than surfacing as an uncoded failure once the write is under way.
+                // A bare name on BOTH sides can never resolve -- measured, not assumed: delta-rs
+                // answers one with "Ambiguous reference to unqualified field". A bare name that only
+                // the TARGET has does resolve there, measured too, and is refused anyway: whether it
+                // resolves depends on the pipeline's SELECT list, so the day that pipeline starts
+                // producing a column of the same name the predicate becomes ambiguous and the write
+                // fails on a run that changed nothing about the predicate. One word ('target.') costs
+                // the author nothing and makes the predicate say what it means. The message therefore
+                // says a side is REQUIRED rather than claiming a bare name matches nothing.
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     "'merge_predicate' must say which side of the merge each column belongs to: a merge " +
-                    "has both an existing row and an incoming one, so a bare column name matches " +
-                    "neither",
+                    "has both an existing row and an incoming one, and this connector does not guess " +
+                    "which of them a bare column name meant",
                     "qualify every column with 'target.' for the existing row or 'source.' for the " +
                     "incoming one, e.g. merge_predicate: \"target.dt >= '2026-01-01'\"");
             }
@@ -133,7 +153,8 @@ internal static class DeltaMergeSql
             {
                 throw DeltaErrors.Fail(DeltaErrors.InvalidMergePredicate,
                     "'merge_predicate' must be a single, self-contained boolean expression written only " +
-                    "from this output's own columns (optionally qualified 'target.' or 'source.'), " +
+                    "from column names qualified 'target.' (a column of the table being written into) " +
+                    "or 'source.' (a column of this output), " +
                     "'\''-quoted string literals carrying no quote of their own, numbers, balanced " +
                     "parentheses, the operators " +
                     "= <> != < > <= >= + - * / and the words AND OR NOT IS NULL IN BETWEEN LIKE TRUE " +
@@ -232,14 +253,23 @@ internal static class DeltaMergeSql
     /// (doubled-character escape only, which is the sole escape this SQL dialect applies to it); a
     /// number; whitespace; ','; balanced parentheses; and the operators listed above.
     ///
+    /// The two sides resolve against two DIFFERENT name lists, and that is the whole reason this method
+    /// takes both. <c>source.</c> and bare names resolve against the batch being written;
+    /// <c>target.</c> names resolve against the existing table. Under <c>schema_policy: evolve</c> a
+    /// table legitimately carries nullable columns a given write does not produce, and narrowing a merge
+    /// by one of them (<c>target.archived IS NULL</c>) is the ordinary reason to write a predicate at
+    /// all — resolving <c>target.</c> against the batch refuses exactly that, with advice ("name this
+    /// output's own columns") the author cannot follow. Measured against the shipped library: a merge
+    /// whose source lacks 'archived' runs that predicate fine.
+    ///
     /// The qualifier is REQUIRED on a column, and the reason is narrower than "unqualified names are
     /// bad": delta-rs resolves an unqualified name against both sides at once and errors with
     /// "Ambiguous reference to unqualified field" only when the name is on both. Measured: with a
     /// target wider than the incoming batch, an unqualified reference to a target-ONLY column resolves
-    /// fine. Every name this scanner can accept comes from the batch being written, so it is on both
-    /// sides by construction and can never resolve — which is what makes refusing it total rather than
-    /// merely cautious. A caller that ever resolves names against the TABLE's schema instead has to
-    /// revisit this, because a target-only column would then be a name that does resolve unqualified.
+    /// fine — so refusing a bare name is NOT total, and the refusal message must not claim it is. It is
+    /// refused all the same because whether it resolves is a property of the pipeline's SELECT list,
+    /// not of the predicate: the same predicate becomes ambiguous, and the write fails, the day the
+    /// pipeline starts selecting a column of that name.
     ///
     /// Column names are matched ORDINALLY, quoted or not, because that is what the merge path does with
     /// them — measured against the shipped library, not assumed. Inside a MERGE predicate delta-rs
@@ -257,7 +287,8 @@ internal static class DeltaMergeSql
     /// This is a lexical scan, not SQL parsing: it recognizes token boundaries, resolves each word
     /// against a name list, and tracks paren depth. It makes no attempt to understand the
     /// expression.</summary>
-    private static PredicateVerdict Inspect(string predicate, IReadOnlyList<string> columns)
+    private static PredicateVerdict Inspect(
+        string predicate, IReadOnlyList<string> columns, IReadOnlyList<string> targetColumns)
     {
         var depth = 0;
         var i = 0;
@@ -308,7 +339,10 @@ internal static class DeltaMergeSql
                 // parser's unescaping that is already known to differ between its own paths, so the
                 // escape is refused outright. The cost is that a value containing a quote cannot be
                 // named in a merge_predicate at all; the alternative is a predicate that silently
-                // means something its author did not write.
+                // means something its author did not write. This is one of the three refusals that
+                // share that one measured premise -- see the type doc comment. If its execution test
+                // starts failing after a version bump, all three are to be re-decided together, not
+                // this one on its own.
                 var end = SkipQuoted(predicate, i, c);
                 if (end < 0 || predicate.AsSpan(i + 1, end - i - 2).Contains('\''))
                 {
@@ -333,7 +367,7 @@ internal static class DeltaMergeSql
                     i++;
                     if (!Qualifiers.Contains(word, StringComparer.Ordinal)
                         || !TryReadWord(predicate, ref i, out var column, out _)
-                        || !columns.Contains(column, StringComparer.Ordinal))
+                        || !Side(word).Contains(column, StringComparer.Ordinal))
                     {
                         return PredicateVerdict.Malformed;
                     }
@@ -342,7 +376,8 @@ internal static class DeltaMergeSql
                 {
                     // A keyword stands alone; only a column needs a side.
                 }
-                else if (columns.Contains(word, StringComparer.Ordinal))
+                else if (columns.Contains(word, StringComparer.Ordinal)
+                         || targetColumns.Contains(word, StringComparer.Ordinal))
                 {
                     return PredicateVerdict.Unqualified;
                 }
@@ -375,6 +410,12 @@ internal static class DeltaMergeSql
         }
 
         return depth == 0 ? PredicateVerdict.Ok : PredicateVerdict.Malformed;
+
+        // Which name list a qualifier resolves against. 'target' is the table as it stands; 'source' is
+        // the batch on its way in. Nothing else reaches here — the caller has already checked the word
+        // against Qualifiers.
+        IReadOnlyList<string> Side(string qualifier) =>
+            string.Equals(qualifier, "target", StringComparison.Ordinal) ? targetColumns : columns;
     }
 
     /// <summary>Reads one word — a bare identifier or a '"'-quoted one — advancing
@@ -574,7 +615,11 @@ internal static class DeltaMergeSql
     /// paths. A backslash is NOT refused here, and that is measured too, not an oversight: a column
     /// named <c>back\</c> and one named <c>a\b</c> both render, match and update correctly, and the
     /// one shape that would worry — a backslash immediately before the closing delimiter — needs a '"'
-    /// in the name, which is refused above.</summary>
+    /// in the name, which is refused above.
+    ///
+    /// The third of the three refusals sharing one premise — see the type doc comment. A version bump
+    /// that fixes the unescaping fails all three execution tests at once, and that is the signal to
+    /// re-decide all three, not to relax this one.</summary>
     private static void RefuseUnquotableNames(
         IReadOnlyList<string> columns, IReadOnlyList<string> keys,
         IReadOnlyList<PartitionFilter>? partitionFilters)

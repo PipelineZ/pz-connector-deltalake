@@ -14,6 +14,14 @@ internal static class DeltaTestTable
         .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
         .Build();
 
+    /// <summary>A schema's column names. A merge statement resolves a `target.`-qualified name against
+    /// the TABLE's columns and a `source.`-qualified one against the batch's, so every call site has to
+    /// say which it means. Every fixture in this file has the same columns on both sides, which is
+    /// exactly why a test that needs them to DIFFER builds its own list.</summary>
+    public static IReadOnlyList<string> ColumnsOf(Schema schema) => [.. schema.FieldsList.Select(f => f.Name)];
+
+    public static readonly IReadOnlyList<string> Columns = ColumnsOf(Schema);
+
     public static string Partition(long id) => $"2026-01-{(int)(id % 8) + 1:D2}";
 
     public static RecordBatch Rows(long from, long count)

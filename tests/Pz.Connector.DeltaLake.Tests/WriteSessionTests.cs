@@ -839,21 +839,25 @@ public class WriteSessionTests
     }
 
     [Fact]
-    public async Task Merge_is_refused_at_begin_so_it_never_creates_a_table_it_cannot_write_to()
+    public async Task Merge_opens_a_session_and_creates_the_table_it_will_write_to()
     {
-        // Refusing at commit would mean BeginWriteAsync had already created the table and the whole
-        // pipeline had already been buffered, leaving an orphan table behind for a strategy that was
-        // never going to write to it.
-        var dir = TempDir("pz-delta-merge-todo");
+        // This test replaces the one that pinned merge's refusal at BeginWriteAsync. The refusal had a
+        // reason worth keeping visible: a strategy refused at COMMIT has already created a table and
+        // buffered the whole pipeline, leaving an orphan behind. Now that merge writes, the same
+        // property is asserted the other way round — begin creates the table, and the merge is what
+        // fills it.
+        var dir = TempDir("pz-delta-merge-begin");
         await using var sink = await OpenSink(dir);
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await sink.BeginWriteAsync(
-            Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default));
-        // The config family, not the runtime one: this is decided from the OutputSpec alone, before
-        // anything is opened, and PZDL0404 is about storage-layer failures.
-        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
-        Assert.Contains("merge", ex.Message);
-        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
+        await using (var session = await sink.BeginWriteAsync(
+            Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default))
+        {
+            Assert.True(Directory.Exists(Path.Combine(dir, "orders")));
+            await session.WriteBatchAsync(DeltaTestTable.Rows(0, 3), default);
+            Assert.Equal(3, (await session.CommitAsync(default)).RowsWritten);
+        }
+
+        Assert.Equal(3, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
     }
 
     [Fact]

@@ -54,7 +54,8 @@ public class MergeSafetyExecutionTests
             Assert.Null(outcome.SkipReason);
             Assert.Equal(values.Length, outcome.Filters!.Single().Literals.Count);
 
-            await MergeAsync(location, DeltaMergeSql.Build(DeltaTestTable.Schema, options, outcome.Filters), batch);
+            await MergeAsync(location, DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                options, outcome.Filters), batch);
 
             var after = await DeltaReader.RowsAsync(location);
             Assert.Equal(values.Length + 1, after.Count);
@@ -102,7 +103,8 @@ public class MergeSafetyExecutionTests
 
             await MergeAsync(
                 location,
-                DeltaMergeSql.Build(DeltaTestTable.Schema, options, [new PartitionFilter("dt", literals)]),
+                DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                    options, [new PartitionFilter("dt", literals)]),
                 batch);
 
             var after = await DeltaReader.RowsAsync(location);
@@ -220,7 +222,8 @@ public class MergeSafetyExecutionTests
         try
         {
             var safe = await CreatePartitionedAsync(dir, [(0L, "2026-01-01", 0d)], "safe");
-            await MergeAsync(safe, DeltaMergeSql.Build(DeltaTestTable.Schema, options, null), moved);
+            await MergeAsync(safe, DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                options, null), moved);
 
             var afterSafe = await DeltaReader.RowsAsync(safe);
             var row = Assert.Single(afterSafe);
@@ -230,7 +233,8 @@ public class MergeSafetyExecutionTests
             var unsafeLocation = await CreatePartitionedAsync(dir, [(0L, "2026-01-01", 0d)], "unsafe");
             await MergeAsync(
                 unsafeLocation,
-                DeltaMergeSql.Build(DeltaTestTable.Schema, options, [new PartitionFilter("dt", ["'2026-01-02'"])]),
+                DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                    options, [new PartitionFilter("dt", ["'2026-01-02'"])]),
                 moved);
 
             var afterUnsafe = await DeltaReader.RowsAsync(unsafeLocation);
@@ -290,7 +294,8 @@ public class MergeSafetyExecutionTests
             {
                 using var engine = new DeltaEngine(EngineOptions.Default);
                 var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
-                await table.MergeAsync(DeltaMergeSql.Build(schema, options, outcome.Filters), [batch], schema, default);
+                await table.MergeAsync(DeltaMergeSql.Build(schema, DeltaTestTable.ColumnsOf(schema),
+                    options, outcome.Filters), [batch], schema, default);
                 return 0;
             });
 

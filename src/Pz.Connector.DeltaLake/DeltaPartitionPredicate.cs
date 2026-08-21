@@ -169,6 +169,11 @@ internal static class DeltaPartitionPredicate
             // parser mishandles, and it readmits the duplicate the moment that parser's unescaping
             // shifts; refusing both characters outright cannot fail that way. The cost is no pruning
             // on a value carrying either character, which costs speed and never a row.
+            //
+            // This is one of three refusals in this connector resting on that one measured premise --
+            // see DeltaMergeSql's type doc comment for the other two. All three have execution tests
+            // against real delta-rs, so a version bump that changes the unescaping fails them together;
+            // they are to be re-decided as a set, never relaxed one at a time.
             return text.AsSpan().IndexOfAny('\'', '\\') >= 0
                 ? new Rendered(null,
                     "holds a value this connector does not render as a SQL literal: a partition value " +

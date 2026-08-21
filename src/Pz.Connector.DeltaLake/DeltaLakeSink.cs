@@ -284,19 +284,6 @@ internal sealed class DeltaLakeSink : ISink
                 "correct 'keys' to name columns the pipeline actually selects");
         }
 
-        // Merge is refused HERE, not at commit: refusing at commit means BeginWriteAsync has already
-        // created the table and the whole pipeline has already been buffered, leaving an orphan table
-        // behind for a strategy that was never going to write to it. It sits after the checks above
-        // rather than in DeltaWriteOptions.From so a merge output still learns about a bad option or a
-        // key that names no column — the validation Tasks 12-14 depend on — instead of only learning
-        // that merge does not exist yet.
-        if (options.Mode == "merge")
-        {
-            throw DeltaErrors.Fail(DeltaErrors.InvalidWriteOption,
-                $"output '{spec.Output}': strategy 'merge' is not implemented by this connector yet",
-                "use strategy: append or replace, or pin a connector version whose release notes list merge");
-        }
-
         var location = DeltaLocation.Resolve(
             this.config.GetString("root") ?? string.Empty, spec.Output,
             spec.Options.TryGetValue("path", out var p) ? p?.ToString() : null);
@@ -310,7 +297,11 @@ internal sealed class DeltaLakeSink : ISink
             var existing = await DeltaBigStack.RunAsync(
                 () => Task.FromResult((table.Schema(), table.Metadata().PartitionColumns))).ConfigureAwait(false);
             Reconcile(schema, existing.Item1, existing.Item2, options, spec);
-            return new DeltaWriteSession(table, schema, options, spec.Output);
+            // The TABLE's column names, not the write's: they are what a target.-qualified name in a
+            // merge_predicate has to resolve against, and under schema_policy: evolve the table
+            // legitimately carries nullable columns this write does not produce.
+            var targetColumns = existing.Item1.FieldsList.Select(f => f.Name).ToList();
+            return new DeltaWriteSession(table, schema, targetColumns, options, spec.Output);
         }
         catch (Exception ex)
         {

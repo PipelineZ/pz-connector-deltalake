@@ -17,27 +17,30 @@ public class DeltaMergeSqlTests
 
     [Fact]
     public void A_single_key_merge_matches_its_golden() =>
-        AssertGolden("merge-single-key.sql", DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"]), null));
+        AssertGolden("merge-single-key.sql", DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id"]), null));
 
     [Fact]
     public void A_composite_key_merge_ands_every_key_in_the_on_clause() =>
-        AssertGolden("merge-composite-key.sql", DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"]), null));
+        AssertGolden("merge-composite-key.sql", DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id", "dt"]), null));
 
     [Fact]
     public void An_explicit_merge_predicate_is_appended_to_the_on_clause() =>
         AssertGolden("merge-explicit-predicate.sql",
-            DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "target.dt >= '2026-01-01'"), null));
+            DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "target.dt >= '2026-01-01'"), null));
 
     [Fact]
     public void A_derived_partition_predicate_is_appended_to_the_on_clause() =>
         AssertGolden("merge-derived-partition.sql",
-            DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]),
+            DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id", "dt"], ["dt"]),
                 [new PartitionFilter("dt", ["'2026-01-01'", "'2026-01-02'"])]));
 
     [Fact]
     public void Key_columns_are_not_updated_because_they_are_what_matched()
     {
-        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"]), null);
+        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id"]), null);
         Assert.DoesNotContain("SET target.\"id\"", sql);
         Assert.Contains("target.\"amt\" = source.\"amt\"", sql);
     }
@@ -49,7 +52,7 @@ public class DeltaMergeSqlTests
             .Field(f => f.Name("order").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
             .Field(f => f.Name("select").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Build();
-        var sql = DeltaMergeSql.Build(schema, Opts(["order"]), null);
+        var sql = DeltaMergeSql.Build(schema, DeltaTestTable.ColumnsOf(schema), Opts(["order"]), null);
         Assert.Contains("\"order\"", sql);
         Assert.Contains("\"select\"", sql);
     }
@@ -61,7 +64,8 @@ public class DeltaMergeSqlTests
         // process: two calls agreeing proves nothing about a generator that has become unordered, and
         // a hash set enumerated twice in one process is very likely to agree with itself.
         var filters = new[] { new PartitionFilter("dt", ["'x'"]) };
-        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), filters);
+        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id", "dt"], ["dt"]), filters);
 
         Assert.Equal(
             "MERGE INTO target USING source ON target.\"id\" = source.\"id\" AND target.\"dt\" = source.\"dt\"" +
@@ -77,7 +81,8 @@ public class DeltaMergeSqlTests
         // merge_predicate is appended to the ON clause. It must not be able to terminate the statement
         // and start another one.
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "1=1; DROP TABLE x"), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "1=1; DROP TABLE x"), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -88,7 +93,8 @@ public class DeltaMergeSqlTests
     [InlineData("target.dt >= '2026-01-01'")]
     [InlineData("source.dt >= '2026-01-01'")]
     public void A_well_formed_merge_predicate_is_accepted(string predicate) =>
-        Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id"], mergePredicate: predicate), null));
 
     [Fact]
     public void A_predicate_that_closes_the_wrapping_paren_early_is_refused()
@@ -99,7 +105,8 @@ public class DeltaMergeSqlTests
         // matches every row in the table regardless of key equality. The terminator/comment blocklist
         // does not catch this — there is no ';', '--', '/*', or '*/' anywhere in it.
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "1=1) OR (1=1"), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "1=1) OR (1=1"), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -112,7 +119,8 @@ public class DeltaMergeSqlTests
         // still close the wrapping group early and open an unconstrained one.
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                DeltaTestTable.Schema, Opts(["id"], mergePredicate: "col = '(' OR 1=1) OR (1=1 OR col = ')'"), null));
+                DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "col = '(' OR 1=1) OR (1=1 OR col = ')'"), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -120,7 +128,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_with_a_legitimately_unbalanced_open_paren_is_refused()
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "(target.dt >= '2026-01-01'"), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "(target.dt >= '2026-01-01'"), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -128,7 +137,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_with_balanced_nested_parens_is_accepted()
     {
         var sql = DeltaMergeSql.Build(
-            DeltaTestTable.Schema, Opts(["id"], mergePredicate: "(target.dt >= '2026-01-01' AND target.amt > 0)"), null);
+            DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id"], mergePredicate: "(target.dt >= '2026-01-01' AND target.amt > 0)"), null);
         Assert.Contains("(target.dt >= '2026-01-01' AND target.amt > 0)", sql);
     }
 
@@ -139,7 +149,7 @@ public class DeltaMergeSqlTests
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
             .Field(f => f.Name("dt").DataType(Apache.Arrow.Types.StringType.Default).Nullable(false))
             .Build();
-        var sql = DeltaMergeSql.Build(schema, Opts(["id", "dt"]), null);
+        var sql = DeltaMergeSql.Build(schema, DeltaTestTable.ColumnsOf(schema), Opts(["id", "dt"]), null);
 
         Assert.DoesNotContain("WHEN MATCHED", sql);
         Assert.Contains(
@@ -182,7 +192,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_that_escapes_its_parenthesised_group_is_refused(string payload)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: payload), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: payload), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
 
         // The refusal names the rule, never the text that broke it: a predicate can carry anything a
@@ -227,7 +238,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_outside_the_permitted_alphabet_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -240,7 +252,8 @@ public class DeltaMergeSqlTests
         // Rendering "AND (   )" would surface a configuration mistake as a runtime write failure, and
         // silently dropping the option would answer a question the user did not ask.
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -253,7 +266,8 @@ public class DeltaMergeSqlTests
     [InlineData("target.amt >= -1.5")]
     [InlineData("target.amt * 2 + 1 <= 10 / 5")]
     public void An_ordinary_predicate_survives_the_alphabet_check(string predicate) =>
-        Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(predicate, DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id"], mergePredicate: predicate), null));
 
     [Fact]
     public void A_column_name_containing_a_quote_is_refused_rather_than_doubled()
@@ -269,7 +283,7 @@ public class DeltaMergeSqlTests
             .Build();
 
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(schema, Opts(["id"]), null));
+            () => DeltaMergeSql.Build(schema, DeltaTestTable.ColumnsOf(schema), Opts(["id"]), null));
         Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
         Assert.Contains("a\"b", ex.Message);
     }
@@ -295,7 +309,7 @@ public class DeltaMergeSqlTests
 
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                schema, Opts(["id", "k\"key"], ["p\"part"]),
+                schema, DeltaTestTable.ColumnsOf(schema), Opts(["id", "k\"key"], ["p\"part"]),
                 [new PartitionFilter("p\"part", ["'1'"])]));
 
         Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
@@ -328,7 +342,8 @@ public class DeltaMergeSqlTests
 
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                schema, Opts(["id"], mergePredicate: "target.\"a\"\"\"\"b\" = 'x'"), null));
+                schema, DeltaTestTable.ColumnsOf(schema),
+                Opts(["id"], mergePredicate: "target.\"a\"\"\"\"b\" = 'x'"), null));
         Assert.Contains(DeltaErrors.UnquotableColumnName, ex.Message);
     }
 
@@ -337,7 +352,7 @@ public class DeltaMergeSqlTests
     {
         // "ID" does not name the column "id". Matching case-insensitively would drop "id" from the
         // UPDATE SET while joining on a column that does not exist.
-        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["ID"]), null);
+        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["ID"]), null);
 
         Assert.Contains("target.\"ID\" = source.\"ID\"", sql);
         Assert.Contains("target.\"id\" = source.\"id\"", sql);
@@ -347,7 +362,8 @@ public class DeltaMergeSqlTests
     public void A_partition_filter_with_no_literals_is_refused_rather_than_rendered_as_an_empty_in_list()
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [])]));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [])]));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -374,7 +390,8 @@ public class DeltaMergeSqlTests
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]));
+                DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -395,7 +412,8 @@ public class DeltaMergeSqlTests
 
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
             () => DeltaMergeSql.Build(
-                DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]));
+                DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]));
 
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.Contains("'dt'", ex.Message);
@@ -412,7 +430,8 @@ public class DeltaMergeSqlTests
     public void A_self_contained_partition_literal_is_accepted(string literal)
     {
         var sql = DeltaMergeSql.Build(
-            DeltaTestTable.Schema, Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]);
+            DeltaTestTable.Schema, DeltaTestTable.Columns,
+            Opts(["id", "dt"], ["dt"]), [new PartitionFilter("dt", [literal])]);
         Assert.Contains($"target.\"dt\" IN ({literal})", sql);
     }
 
@@ -448,7 +467,8 @@ public class DeltaMergeSqlTests
     [InlineData("target.id In (1, 2) or TRUE")]
     public void A_predicate_over_this_outputs_own_columns_is_accepted(string predicate) =>
         Assert.Contains(
-            predicate, DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+            predicate, DeltaMergeSql.Build(AwkwardSchema(), DeltaTestTable.ColumnsOf(AwkwardSchema()),
+                Opts(["id"], mergePredicate: predicate), null));
 
     [Theory]
     // Column names are matched ordinally because that is what the MERGE path does with them, measured
@@ -480,7 +500,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_whose_names_differ_from_the_schema_only_in_case_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(AwkwardSchema(), DeltaTestTable.ColumnsOf(AwkwardSchema()),
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
 
         // A name that differs in case names NOTHING, so the refusal must not be the one that tells the
@@ -508,7 +529,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_that_does_not_say_which_side_a_column_belongs_to_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(AwkwardSchema(), DeltaTestTable.ColumnsOf(AwkwardSchema()),
+                Opts(["id"], mergePredicate: predicate), null));
 
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.Contains(WhichSide, ex.Message);
@@ -522,7 +544,8 @@ public class DeltaMergeSqlTests
     {
         const string Predicate = "NOT (target.Amt IS NULL) AND TRUE";
         Assert.Contains(
-            Predicate, DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: Predicate), null));
+            Predicate, DeltaMergeSql.Build(AwkwardSchema(), DeltaTestTable.ColumnsOf(AwkwardSchema()),
+                Opts(["id"], mergePredicate: Predicate), null));
     }
 
     [Theory]
@@ -553,7 +576,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_naming_anything_but_a_column_or_a_keyword_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.DoesNotContain(predicate, ex.Message);
         Assert.DoesNotContain(WhichSide, ex.Message);
@@ -576,7 +600,8 @@ public class DeltaMergeSqlTests
     public void A_merge_predicate_carrying_a_doubled_quote_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
         Assert.DoesNotContain(predicate, ex.Message);
     }
@@ -593,7 +618,8 @@ public class DeltaMergeSqlTests
     public void A_predicate_hiding_a_paren_in_a_comment_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -606,7 +632,8 @@ public class DeltaMergeSqlTests
     public void A_quote_directly_after_any_identifier_character_is_refused(string predicate)
     {
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(AwkwardSchema(), DeltaTestTable.ColumnsOf(AwkwardSchema()),
+                Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
@@ -616,7 +643,8 @@ public class DeltaMergeSqlTests
         // Refusing function calls is a deliberate limit rather than an oversight, so the message has to
         // leave the user somewhere to go.
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(DeltaTestTable.Schema, Opts(["id"], mergePredicate: "abs(target.amt) > 1"), null));
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns,
+                Opts(["id"], mergePredicate: "abs(target.amt) > 1"), null));
         Assert.Contains("Function calls", ex.Message);
         Assert.Contains("pipeline's SQL", ex.Message);
     }
@@ -628,6 +656,7 @@ public class DeltaMergeSqlTests
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
             .Field(f => f.Name("dt").DataType(Apache.Arrow.Types.StringType.Default).Nullable(false))
             .Build();
-        AssertGolden("merge-all-key.sql", DeltaMergeSql.Build(schema, Opts(["id", "dt"]), null));
+        AssertGolden("merge-all-key.sql", DeltaMergeSql.Build(schema, DeltaTestTable.ColumnsOf(schema),
+            Opts(["id", "dt"]), null));
     }
 }

@@ -50,6 +50,16 @@ internal static class DeltaErrors
     public const string UnsafeConcurrentS3 = "PZDL0403";
     public const string WriteFailed = "PZDL0404";
 
+    /// <summary>A merge key value that cannot match anything, so the merge would insert a second copy
+    /// of a row it should have updated and report success. Decided from the DATA, not the config, which
+    /// is why it lives with the runtime codes rather than beside PZDL0103's empty-keys check.</summary>
+    public const string UnmatchableMergeKey = "PZDL0405";
+
+    /// <summary>A partition value the storage layer refused. A partition value is not ordinary data: it
+    /// becomes a directory name, so it inherits that layer's limits — a path-component length cap, and
+    /// Delta's own inability to tell an empty partition value from a null one.</summary>
+    public const string UnusablePartitionValue = "PZDL0406";
+
     // Protocol.
     public const string UnsupportedProtocol = "PZDL0501";
 
@@ -60,7 +70,7 @@ internal static class DeltaErrors
         SchemaMismatch,
         UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, CommitConflict, DuplicateMergeKeys,
         UnsafeConcurrentS3,
-        WriteFailed, UnsupportedProtocol,
+        WriteFailed, UnmatchableMergeKey, UnusablePartitionValue, UnsupportedProtocol,
     ];
 
     /// <summary>Bare substrings that identify an optimistic-concurrency loss. "already exists" is
@@ -95,6 +105,19 @@ internal static class DeltaErrors
     ];
 
     private const string DuplicateMergeMarker = "multiple source rows";
+
+    /// <summary>delta-rs's wording when a partition column the table declares NOT NULL receives a null —
+    /// or an empty string, which Delta's partition encoding cannot tell apart from one. Measured against
+    /// the shipped library: an empty value in a non-nullable partition column produces exactly this,
+    /// while the same value in an ordinary non-nullable column produces a different message that names
+    /// the column plainly, and a struct column holding nulls produces none at all.</summary>
+    private const string PartitionNullMarker = "found unmasked nulls for non-nullable";
+
+    /// <summary>The filesystem refusing a path component. A partition value becomes a directory name, so
+    /// a long one exceeds the 255-byte component cap every common local filesystem has. The raw message
+    /// embeds the whole path, and therefore the partition VALUE — which is user data — so this branch is
+    /// the one place in this file that must NOT pass the message through.</summary>
+    private const string NameTooLongMarker = "file name too long";
 
     /// <summary>Truncates delta-rs's row-data preview, keeping the row count. Both halves matter: the
     /// count ("2 rows failed validation check") is the entire diagnostic and carries no data, while
@@ -180,6 +203,29 @@ internal static class DeltaErrors
                 "decide which row wins",
                 "deduplicate upstream — for example add a qualify/row_number filter in the pipeline SQL so " +
                 "each key appears once", ex);
+        }
+
+        if (raw.Contains(PartitionNullMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail(UnusablePartitionValue,
+                $"the delta {operation} put an empty or null value in a partition column the table " +
+                "declares NOT NULL. Delta encodes a partition value into a directory name, where an " +
+                $"empty string and a null are the same thing, so neither can be stored there ({raw})",
+                "filter those rows out in the pipeline SQL, coalesce the column to a non-empty " +
+                "placeholder, or partition by a column that is never empty", ex);
+        }
+
+        if (raw.Contains(NameTooLongMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            // Deliberately no raw message: it is a full path, and the partition value is a segment of
+            // it. Nothing here names a value.
+            return Fail(UnusablePartitionValue,
+                $"the delta {operation} could not create a file because one component of its path was " +
+                "longer than this filesystem allows — a partition value becomes a directory name, and " +
+                "the common cap is 255 bytes; the value is percent-escaped on the way in, so a shorter " +
+                "string can still exceed it",
+                "shorten the partition column in the pipeline SQL (hash or truncate it), partition by a " +
+                "narrower column, or write to a shorter root path. Object storage has no such limit", ex);
         }
 
         if (ConflictMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)) ||
