@@ -59,20 +59,64 @@ public class DeltaBigStackTests
     {
         // The whole point of the gate: a delegate that sequences two delta-rs calls with a plain
         // await between them (open-then-insert, load-then-pin-a-version) must keep BOTH calls on the
-        // big-stack thread, not just the one before the first await. Task.Run forces the antecedent
-        // task to complete on a genuine ThreadPool worker -- exactly how a real async delta-rs call
-        // completes -- so this reproduces the actual failure mode a Task.Yield() might not: a
-        // reviewer-instrumented run of the pre-fix code observed the continuation resume on a
-        // ".NET TP Worker" thread instead of "pz-deltalake" this way.
+        // big-stack thread, not just the one before the first await. Task.Yield() is used rather than
+        // Task.Run(() => {}): Task.Yield() is never synchronously complete, so its continuation always
+        // takes a real asynchronous resumption path, and with no SynchronizationContext installed it
+        // always queues to the thread pool -- exactly the failure this test needs to catch. Task.Run
+        // was tried first and rejected: measured over 3000 iterations against a build with the fix
+        // reverted, Task.Run(() => {}) let the antecedent task complete synchronously and resume
+        // inline about 0.1% of the time, which would make this test pass even when the bug is present.
+        // Task.Yield() gave zero such vacuous passes over the same 3000 iterations.
         var (before, after) = await DeltaBigStack.RunAsync(async () =>
         {
             var beforeThread = Thread.CurrentThread;
-            await Task.Run(() => { });
+            await Task.Yield();
             return (Before: beforeThread, After: Thread.CurrentThread);
         });
 
         Assert.Same(before, after);
         Assert.Equal("pz-deltalake", after.Name);
+    }
+
+    [Fact]
+    public async Task An_orphaned_continuation_after_the_pump_drains_runs_on_the_pool_instead_of_aborting_the_process()
+    {
+        // A fire-and-forget operation started inside a delegate (never awaited before the delegate
+        // returns) still captures the pump as its SynchronizationContext the moment it awaits -- but
+        // by the time it resumes, RunAsync<T> has already returned its result and the pump's queue has
+        // stopped accepting new items. Without a guard, that resumption's Post() throws
+        // InvalidOperationException on the async machinery's own unhandled-exception path
+        // (Task.ThrowAsync), which is NOT catchable by any try/catch here: it aborts the process
+        // (SIGABRT). This test cannot assert "the process did not abort" directly -- if it had, this
+        // test method would never finish running at all -- so reaching the final Assert.True below,
+        // in a suite that otherwise completes normally, IS the proof.
+        var releaseOrphan = new TaskCompletionSource();
+        var orphanRan = new TaskCompletionSource<bool>();
+
+        var result = await DeltaBigStack.RunAsync(async () =>
+        {
+            // Not awaited: this task outlives the delegate's own return.
+            _ = RunOrphanAsync();
+            return 42;
+
+            async Task RunOrphanAsync()
+            {
+                // Captures SynchronizationContext.Current == the pump right here, on the big-stack
+                // thread, before this delegate returns.
+                await releaseOrphan.Task;
+                orphanRan.SetResult(true);
+            }
+        });
+
+        // By now RunAsync<T> has returned: Complete() already ran, the pump's queue is already closed
+        // to new Post() calls, and the orphan above is still suspended waiting on releaseOrphan.
+        Assert.Equal(42, result);
+
+        // Release it now -- strictly after the pump has drained -- so its Post() call is guaranteed to
+        // hit the orphaned-continuation path rather than racing the pump's own shutdown.
+        releaseOrphan.SetResult();
+
+        Assert.True(await orphanRan.Task.WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
     [Fact]

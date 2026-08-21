@@ -253,8 +253,11 @@ public class SchemaTests
         // contain a credential-shaped value -- the scenario a real S3/Azure root would hit if delta-rs
         // ever echoed a storage option back in its own error text. No real delta-rs FFI call is made;
         // this is pure C#, so it needs neither network nor Docker.
-        var engine = new ThrowingEngine(
-            new DeltaLakeException("put failed: AWS_SECRET_ACCESS_KEY=LEAKME rejected", 1));
+        var engine = new FakeDeltaEngine
+        {
+            OnLoadTableAsync = (_, _) =>
+                throw new DeltaLakeException("put failed: AWS_SECRET_ACCESS_KEY=LEAKME rejected", 1),
+        };
 
         var ex = await Assert.ThrowsAsync<PzConnectorException>(() =>
             DeltaStorageOptions.LoadAsync(
@@ -264,16 +267,36 @@ public class SchemaTests
         Assert.Contains(DeltaErrors.TableUnreadable, ex.Message);
     }
 
-    private sealed class ThrowingEngine(Exception toThrow) : IEngine
+    [Fact]
+    public async Task LoadAsync_disposes_the_loaded_table_on_the_big_stack_thread_when_the_version_pin_fails()
     {
-        public Task<ITable> CreateTableAsync(TableCreateOptions options, CancellationToken ct) =>
-            Task.FromException<ITable>(toThrow);
-
-        public Task<ITable> LoadTableAsync(TableOptions options, CancellationToken ct) =>
-            Task.FromException<ITable>(toThrow);
-
-        public void Dispose()
+        // A fake IEngine/ITable proves disposal directly, with no native code and no reliance on
+        // observing a leaked handle (which a single xunit run cannot do): the fake's Dispose() sets a
+        // flag AND records which thread called it, and LoadTableAsync succeeds (so there is a real
+        // table to fail to dispose) while LoadVersionAsync fails (the ordinary "version not found"
+        // case DeltaStorageOptions.LoadAsync's try/catch/dispose/rethrow exists to serve).
+        string? disposedOnThreadName = null;
+        var versionFailure = new DeltaLakeException("version 99 not found", 1);
+        var table = new FakeDeltaTable
         {
-        }
+            OnLoadVersionAsync = (_, _) => throw versionFailure,
+            OnDispose = () => disposedOnThreadName = Thread.CurrentThread.Name,
+        };
+        var engine = new FakeDeltaEngine { OnLoadTableAsync = (_, _) => Task.FromResult<ITable>(table) };
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() =>
+            DeltaStorageOptions.LoadAsync(
+                engine, "s3://w/d/orders", Cfg(("root", "s3://w/d")), version: 0L, dataset: "orders", ct: default));
+
+        // Disposal happening on "pz-deltalake", not the calling thread, is what distinguishes disposing
+        // INSIDE the DeltaBigStack.RunAsync delegate (correct -- ITable.Dispose() is itself an FFI
+        // call, decompiled down to a native table_free) from an alternative fix that disposed in
+        // LoadAsync's OUTER catch instead, which would still satisfy "the table gets disposed" but on
+        // the wrong thread.
+        Assert.Equal("pz-deltalake", disposedOnThreadName);
+
+        // The user needs to see the LoadVersionAsync failure, not a replacement produced somewhere
+        // along the way.
+        Assert.Same(versionFailure, ex.InnerException);
     }
 }

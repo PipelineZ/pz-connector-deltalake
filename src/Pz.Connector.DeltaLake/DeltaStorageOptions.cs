@@ -104,7 +104,16 @@ internal static class DeltaStorageOptions
                         // because the failure happened one call later than it used to.
                         if (table is IDisposable disposable)
                         {
-                            disposable.Dispose();
+                            try
+                            {
+                                disposable.Dispose();
+                            }
+                            catch
+                            {
+                                // A failure disposing the table must not replace the LoadVersionAsync
+                                // failure the user actually needs to see with a less useful one -- the
+                                // bare `throw;` below still rethrows THAT exception either way.
+                            }
                         }
 
                         throw;
