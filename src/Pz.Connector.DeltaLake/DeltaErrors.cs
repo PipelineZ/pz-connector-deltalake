@@ -252,17 +252,24 @@ internal static class DeltaErrors
         if (raw.Contains(DuplicateMergeMarker, StringComparison.OrdinalIgnoreCase))
         {
             var keys = mergeKeys.Count == 0 ? "the merge keys" : string.Join(", ", mergeKeys);
-            // This connector resolves a repeated key in its own input before the statement runs
-            // (DeltaMergeDedup), so reaching here means the multiplicity came from somewhere the
-            // resolver cannot see -- the TARGET holding two rows for one key, which an earlier
-            // silently-duplicating write or another writer can leave behind. The next step therefore
-            // names the table, not the pipeline: telling the author to deduplicate their own SELECT
-            // would send them to look at input that is already unique by the time delta-rs sees it.
+            // What delta-rs's marker means, by its own wording, is SOURCE-side multiplicity: two
+            // incoming rows matching one target row. DeltaMergeDedup removes exactly that before the
+            // statement runs, so reaching here means the resolver's notion of key equality disagreed
+            // with DataFusion's — a defect in this connector, not something the user configured.
+            //
+            // The next step therefore asks for a report rather than naming a fix, and two other
+            // wordings were rejected on measurement rather than taste. "Deduplicate upstream" is wrong
+            // because the input IS deduplicated by the time delta-rs sees it. "Remove the duplicate
+            // rows from the table" is wrong because a duplicated key in the TARGET does not produce
+            // this error at all: measured against delta-rs 0.33.0, a merge into a table holding two
+            // rows for one key commits, updates both copies and leaves the duplicate in place,
+            // silently. That is a documented limit, not this code path.
             return Fail(DuplicateMergeKeys,
-                $"the table being written into holds more than one row per merge key ({keys}), so the " +
-                "merge cannot decide which row to update",
-                "remove the duplicate rows from the table — this write's own input is already resolved " +
-                "to one row per key before the merge runs", ex);
+                $"delta-rs reports more than one incoming row per merge key ({keys}), which this " +
+                "connector resolves before a merge runs — so reaching this means its duplicate-key " +
+                "resolution did not recognise two of this write's own rows as sharing a key",
+                "report this as a connector bug, naming the merge key column(s) and their types — " +
+                "there is no configuration change that avoids it", ex);
         }
 
         // Write operations only: the same message reaches a READ of a table some earlier write already

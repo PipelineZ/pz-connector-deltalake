@@ -55,6 +55,46 @@ public class DeltaMergeExecutionTests
             DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id", "dt"], ["dt"]),
             [new PartitionFilter("dt", ["'2026-01-01'", "'2026-01-02'"])]));
 
+    /// <summary>The `PZDL0402` marker still matches what REAL delta-rs emits for a source-side
+    /// duplicate key. Nothing reachable through the sink can produce this any more —
+    /// <see cref="DeltaMergeDedup"/> resolves a repeat before the statement runs — so the statement is
+    /// handed duplicate source rows directly here, which is the only way left to make delta-rs say it.
+    ///
+    /// Without this the mapping would rest entirely on a hand-fed string, and a wording change in
+    /// delta-rs would silently degrade a coded, non-transient error to the generic write failure with
+    /// no test noticing. That is the same class of rot the three quote refusals are pinned against:
+    /// the model checked against the dialect, not against itself.</summary>
+    [Fact]
+    public async Task The_duplicate_source_key_marker_still_matches_what_real_delta_rs_emits()
+    {
+        var dir = Directory.CreateTempSubdirectory("pz-delta-dupmarker").FullName;
+        try
+        {
+            var location = await DeltaTestTable.CreateLocalAsync(dir, rows: 10);
+            var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, DeltaTestTable.Columns, Opts(["id"]), null);
+
+            // Two source rows for id 5, which the table already holds: WHEN MATCHED fires twice for one
+            // target row, which is precisely the multiplicity delta-rs refuses.
+            var source = DeltaTestTable.RowsWithAmounts(
+                [(5, DeltaTestTable.Partition(5), 1.0), (5, DeltaTestTable.Partition(5), 2.0)]);
+
+            var raw = await Assert.ThrowsAnyAsync<Exception>(() => MergeAtAsync(location, sql, source));
+
+            var mapped = DeltaErrors.Translate(raw, DeltaOperationKind.Merge, "merge", ["id"]);
+            Assert.Contains(DeltaErrors.DuplicateMergeKeys, mapped.Message);
+            Assert.Contains("id", mapped.Message);
+            Assert.False(mapped.IsTransient);
+
+            // The generated statement carries partition literals, which are the user's data, and is
+            // not a diagnostic they can act on either.
+            Assert.DoesNotContain("WHEN MATCHED", mapped.Message);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
     [Fact]
     public async Task The_assertion_has_teeth_because_a_widened_on_clause_fails_it()
     {
@@ -340,6 +380,32 @@ public class DeltaMergeExecutionTests
         Assert.Equal(SourceRow.Dt, added.Dt);
         Assert.Equal(SourceRow.Amt, added.Amt);
     }
+
+    /// <summary>Runs one statement against an EXISTING table with a caller-chosen source batch — the
+    /// shape <see cref="MergeAsync(string)"/> cannot serve, because it owns its own fixture and always
+    /// sends the same single row.</summary>
+    private static Task MergeAtAsync(string location, string sql, RecordBatch source) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            // No ConfigureAwait(false) on this delegate's own awaits: DeltaBigStack pumps plain awaits
+            // back onto the big-stack thread, and opting out would run the merge on a default-stack
+            // pool thread.
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                await table.MergeAsync(sql, [source], DeltaTestTable.Schema, default);
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+
+            return 0;
+        });
 
     private static async Task<(int Added, int Changed, int Total, IReadOnlyList<(long Id, string Dt, double Amt)> Rows)> MergeAsync(string sql)
     {

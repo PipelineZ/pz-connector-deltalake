@@ -20,8 +20,13 @@ namespace Pz.Connector.DeltaLake;
 /// arrival-order column to sort on, so this connector resolves it in Arrow instead, before the
 /// statement ever runs.
 ///
-/// The common case costs nothing but the scan: an input with no repeated key is handed back as the
-/// SAME list of batches, not a rebuilt one.</summary>
+/// What the common case costs, stated rather than waved at: no DATA is copied and no batch is rebuilt
+/// — an input with no repeated key is handed back as the SAME list — but the scan that establishes
+/// that is not free. Every key value of every row is boxed into a fresh <c>object[]</c> and inserted
+/// into a dictionary before the resolver can know whether anything repeats, so every merge pays one
+/// managed allocation and one hash insert per row, duplicate-free or not. That is affordable for a
+/// reason specific to this operation: a merge already buffers its entire input in memory, so the row
+/// set is bounded by something the session is holding anyway.</summary>
 internal static class DeltaMergeDedup
 {
     /// <summary>Refuses, at BeginWriteAsync, a merge key whose type this resolver cannot compare —
@@ -212,9 +217,18 @@ internal static class DeltaMergeDedup
             TimestampArray a => a.GetTimestamp(row)!.Value,
             // Hex rather than the byte array itself: two equal byte arrays are different objects and
             // would compare unequal, which would leave every binary key looking distinct.
-            // BinaryArray is the base of LargeBinaryArray and BinaryViewArray, so one case covers all
-            // three; FixedSizeBinaryArray is a separate hierarchy and needs its own.
+            //
+            // Four UNRELATED classes, not one hierarchy: BinaryArray, LargeBinaryArray,
+            // BinaryViewArray and FixedSizeBinaryArray each derive straight from Array, so one arm
+            // does not cover the others and every binary encoding IsComparable admits needs its own
+            // here or it falls to the throw below. They sit after the string arms deliberately, and
+            // that ordering is load-bearing the other way round: StringArray derives from
+            // BinaryArray, StringViewArray from BinaryViewArray and LargeStringArray from
+            // LargeBinaryArray, so a string column reaching a binary arm would be compared as hex
+            // rather than as text.
             BinaryArray a => Convert.ToHexString(a.GetBytes(row)),
+            LargeBinaryArray a => Convert.ToHexString(a.GetBytes(row)),
+            BinaryViewArray a => Convert.ToHexString(a.GetBytes(row)),
             FixedSizeBinaryArray a => Convert.ToHexString(a.GetBytes(row)),
             DictionaryArray a => Value(a.Dictionary, DictionaryIndex(a.Indices, row)),
             _ => throw new NotSupportedException(

@@ -238,6 +238,16 @@ internal sealed class DeltaWriteSession(
         // the resolver returns SLICES that share the buffered batches' memory, so nothing between here
         // and the merge may dispose the buffer. It is also the last step before the call, which is
         // where a reader looking for what delta-rs actually receives will look.
+        //
+        // It is also last relative to the two ROW-LEVEL refusals, and that ordering is a decision
+        // rather than an accident. RefuseEmptyPartitionValues runs per batch in WriteBatchAsync and
+        // RefuseUnmatchableKeys runs at the top of this method, both over the FULL buffer — so a row
+        // the resolver was going to discard can still refuse the whole write, for an empty partition
+        // value or a null/NaN key on a row a later row for the same key would have superseded. That
+        // over-refusal is deliberate: refusing costs one config edit, whereas checking after the
+        // resolution would make whether a value is refused depend on arrival order. It is also what
+        // lets the resolver treat a null or NaN key as unreachable instead of having to define an
+        // identity for values that cannot match themselves.
         var payload = DeltaMergeDedup.LastWriterWins(this.buffered, options.Keys).ToArray();
         try
         {

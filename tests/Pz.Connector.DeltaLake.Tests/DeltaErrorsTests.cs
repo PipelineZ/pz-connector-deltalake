@@ -90,20 +90,22 @@ public class DeltaErrorsTests
     }
 
     [Fact]
-    public void Translate_maps_a_duplicate_key_merge_failure_to_PZDL0402_naming_the_keys_and_the_table()
+    public void Translate_maps_a_duplicate_key_merge_failure_to_PZDL0402_and_asks_for_a_bug_report()
     {
-        // The connector resolves a repeated key in its OWN input before the statement runs
-        // (DeltaMergeDedup), so this message can now only be reached when the multiplicity is in the
-        // TARGET -- two rows for one key already in the table. The next step therefore has to send the
-        // reader to the table; the old wording sent them to deduplicate a pipeline whose output is
-        // already unique by the time delta-rs sees it, which is advice they cannot act on.
+        // delta-rs's marker names SOURCE-side multiplicity, and DeltaMergeDedup removes that before a
+        // merge runs -- so the only way to reach this message is the resolver disagreeing with
+        // DataFusion about key equality, which is a connector defect. The message must therefore ask
+        // for a report, not send the user to edit something. Both wordings this replaced named causes
+        // that provably do not produce the error: the pipeline's own SELECT (already resolved), and
+        // duplicate rows in the TARGET (measured to commit silently instead of erroring).
         var raw = new DeltaLakeException(
             "MERGE matched a target row with multiple source rows that satisfy duplicate relevant WHEN MATCHED clauses", 1);
         var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Merge, "merge", ["order_id", "region"]);
         Assert.Contains("PZDL0402", ex.Message);
         Assert.Contains("order_id, region", ex.Message);
-        Assert.Contains("table", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("connector bug", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("pipeline SQL", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("remove the duplicate rows", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(ex.IsTransient);
         Assert.Same(raw, ex.InnerException);
     }

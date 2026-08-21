@@ -119,6 +119,45 @@ public class MergeDuplicateKeyTests
         Assert.Equal(10d, rows.Single(r => r.Dt == "2026-01-02").Amt);
     }
 
+    /// <summary>The documented limit, pinned so it cannot go stale silently: a duplicate ALREADY in
+    /// the table is neither detected nor repaired. The resolver reads the write's own buffer, not the
+    /// target, so two rows the table already holds for one key are outside its reach — the merge
+    /// updates every copy and leaves them all there, commits, and reports success.
+    ///
+    /// Not a defect this connector can fix at a price worth paying: detecting it means reading the
+    /// whole target on every merge, which costs more than the operation it would protect. It is
+    /// recorded in docs/reference/write.md as a limit, and asserted here so a delta-rs release that
+    /// starts refusing it makes this test fail rather than leaving the documentation wrong.</summary>
+    [Fact]
+    public async Task A_duplicate_already_in_the_table_survives_the_merge_and_is_not_reported()
+    {
+        var dir = Directory.CreateTempSubdirectory("pz-delta-dup-intable").FullName;
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 0);
+        await using var sink = await OpenSink(dir);
+
+        // An append does not resolve keys -- it is how a table comes to hold two rows for one key in
+        // the first place.
+        var append = new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>());
+        await using (var s = await sink.BeginWriteAsync(append, DeltaTestTable.Schema, default))
+        {
+            await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts(
+                [(5, "2026-01-06", 1d), (5, "2026-01-06", 2d)]), default);
+            await s.CommitAsync(default);
+        }
+
+        await using (var s = await sink.BeginWriteAsync(Merge("id"), DeltaTestTable.Schema, default))
+        {
+            await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(5, "2026-01-06", 9d)]), default);
+            await s.CommitAsync(default);
+        }
+
+        // Both copies updated, both still there, and no error was raised on the way.
+        var rows = await DeltaReader.RowsAsync(Path.Combine(dir, "orders"));
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.Equal(5, r.Id));
+        Assert.All(rows, r => Assert.Equal(9d, r.Amt));
+    }
+
     [Fact]
     public async Task A_merge_key_the_resolver_cannot_compare_is_refused_before_the_table_is_touched()
     {

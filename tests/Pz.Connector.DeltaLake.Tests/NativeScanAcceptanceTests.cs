@@ -1,4 +1,5 @@
 using System.Globalization;
+using Apache.Arrow.Types;
 using DuckDB.NET.Data;
 using Pz.Connectors.Abstractions;
 using Xunit;
@@ -67,13 +68,43 @@ public class NativeScanAcceptanceTests
             declared.Schema.FieldsList.Select(f => f.Name),
             produced.Select(c => c.Name));
 
-        // Names alone would pass on a schema whose types all drifted, so the DuckDB type is compared
-        // too — by the CLR type its reader hands back, which is the only common vocabulary the two
-        // engines share here.
+        // DECLARED type against PRODUCED type, field by field — not against a literal. What the
+        // TestKit fact compares is the declared DataType.TypeId against the produced batch's, so a
+        // replacement that only pinned the produced side against a hard-coded triple would go green on
+        // a GetSchemaAsync that started declaring the wrong types, which is the regression that
+        // matters: pz types a pipeline's SQL against this schema at compile time, so a declared-type
+        // drift ships silently and surfaces as SQL checked against a shape the data does not have.
+        Assert.Equal(
+            declared.Schema.FieldsList.Select(f => ClrTypeOf(f.DataType)),
+            produced.Select(c => c.Type));
+
+        // And the seed's own shape, so the pairwise check above cannot be satisfied by BOTH sides
+        // drifting together — a schema that declared everything as a string and a scan that produced
+        // strings would agree with each other and be wrong.
         Assert.Equal(
             new[] { typeof(long), typeof(string), typeof(double) },
             produced.Select(c => c.Type));
     }
+
+    /// <summary>The CLR type DuckDB's reader hands back for a given Arrow type — the only vocabulary
+    /// the two engines share, since delta-rs declares Arrow and DuckDB reports .NET types. Covers the
+    /// types this connector's own fixtures produce; anything else is a loud failure rather than a
+    /// silent pass, because a mapping that quietly returned null would make the comparison above
+    /// vacuous for exactly the field that drifted.</summary>
+    private static Type ClrTypeOf(IArrowType type) => type.TypeId switch
+    {
+        ArrowTypeId.Int64 => typeof(long),
+        ArrowTypeId.Int32 => typeof(int),
+        ArrowTypeId.Double => typeof(double),
+        ArrowTypeId.Float => typeof(float),
+        ArrowTypeId.Boolean => typeof(bool),
+        ArrowTypeId.String or ArrowTypeId.LargeString or ArrowTypeId.StringView => typeof(string),
+        ArrowTypeId.Date32 or ArrowTypeId.Date64 or ArrowTypeId.Timestamp => typeof(DateTime),
+        ArrowTypeId.Decimal128 => typeof(decimal),
+        _ => throw new NotSupportedException(
+            $"no DuckDB CLR type known for Arrow {type.Name}; add it rather than letting the " +
+            "declared-vs-produced comparison skip the field"),
+    };
 
     [SkippableFact]
     public async Task Two_reads_of_the_same_scan_agree()

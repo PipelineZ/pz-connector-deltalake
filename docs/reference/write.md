@@ -101,10 +101,19 @@ key is already in the table delta-rs refuses the whole statement, and if it is *
 to `WHEN NOT MATCHED` and both are inserted — one commit, no error, and a duplicate of a key the output
 declared unique.
 
-`PZDL0402` therefore no longer reports a repeat in *your* write. It now reports a repeat in the
-**table**: two rows already sitting there for one key, which an older run or another writer can leave
-behind. Remove them from the table; the write's own input is already resolved by the time the merge
-runs.
+`PZDL0402` therefore no longer reports anything you can fix. It maps delta-rs's own
+"multiple source rows" error, which describes a repeat in the *incoming* rows — and those are resolved
+before the statement runs, so reaching it means this connector's idea of key equality disagreed with
+the SQL engine's. If you ever see it, it is a connector bug: report it with the merge key column names
+and their types. There is no configuration change that avoids it.
+
+**Documented limit: a duplicate already in the table is not detected, and not repaired.** If the table
+already holds two rows for one key — left by an older run, by a writer that is not pz, or by an
+`append` — a merge updates **every** copy and leaves them all in place. Measured against delta-rs
+0.33.0: the write commits, reports success, and the duplicate survives with the new values in both
+rows. Nothing here catches it, and `PZDL0402` does not fire for it. Detecting it would mean reading the
+whole target table on every merge, which costs more than the operation it would protect, so the
+connector does not. If you suspect duplicates in a table, check it directly.
 
 **`PZDL0305`** refuses a merge key whose type cannot be compared row to row — a list, struct or map
 column. Without a comparison there is no way to tell a repeat from two distinct keys, and an unresolved
