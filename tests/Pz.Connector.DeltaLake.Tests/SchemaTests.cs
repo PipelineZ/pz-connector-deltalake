@@ -205,6 +205,29 @@ public class SchemaTests
     }
 
     [Fact]
+    public async Task GetSchemaAsync_on_a_version_absent_from_the_tables_history_fails_without_crashing()
+    {
+        // Exercises the path where engine.LoadTableAsync succeeds (allocating a native table handle)
+        // and the SUBSEQUENT table.LoadVersionAsync then fails -- the ordinary "version not found"
+        // case, and the one path where a successfully-loaded table handle could leak if nothing
+        // disposed it on the way out. A single xunit run cannot observe a leaked native handle
+        // directly; this test's job is coverage of the path (so the try/catch/dispose/rethrow in
+        // DeltaStorageOptions.LoadAsync actually runs, with no secondary exception of its own), not
+        // measuring the leak.
+        var dir = Directory.CreateTempSubdirectory("pz-delta-badversion").FullName;
+        var location = await DeltaTestTable.CreateLocalAsync(dir, rows: 5);
+        var source = await ((ISourceConnector)new DeltaLakeConnector())
+            .OpenAsync(Cfg(("root", Path.GetDirectoryName(location)!)), default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+            await source.GetSchemaAsync(
+                new DatasetSpec("lake", "orders", new Dictionary<string, object?> { ["version"] = 99L }), default));
+
+        Assert.Contains("orders", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
     public async Task GetSchemaAsync_never_leaks_a_credential_into_its_error()
     {
         var dir = Directory.CreateTempSubdirectory("pz-delta-leak").FullName;

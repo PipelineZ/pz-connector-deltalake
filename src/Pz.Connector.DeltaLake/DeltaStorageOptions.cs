@@ -73,20 +73,42 @@ internal static class DeltaStorageOptions
 
             return await DeltaBigStack.RunAsync(async () =>
             {
-                var table = await engine.LoadTableAsync(options, ct).ConfigureAwait(false);
+                // No ConfigureAwait(false) on either await in this delegate: DeltaBigStack.RunAsync
+                // installs a pumping SynchronizationContext specifically so a plain await here resumes
+                // on the same big-stack thread the delegate started on, not wherever the antecedent
+                // task happened to complete. ConfigureAwait(false) would opt back out of that and put
+                // the second delta-rs call -- LoadVersionAsync below -- back on a default-stack pool
+                // thread, exactly the bug this connector's DeltaBigStackTests now pins.
+                var table = await engine.LoadTableAsync(options, ct);
                 if (version is { } v)
                 {
-                    // Confirmed against the real 0.33.0 package (a throwaway load against a table with
-                    // a schema-widening second commit, reflection-driven since there is no public API
-                    // surface for it otherwise): passing TableOptions.Version = 0 to LoadTableAsync
-                    // pins table.Version() correctly to 0, but table.Schema()/table.Metadata() still
-                    // reflect the table's LATEST commit, not version 0's -- a library bug specific to
-                    // requesting version 0 through TableOptions. Calling LoadVersionAsync AFTER a
-                    // version-less load does not have this bug for any version tested (0, 1, 2), so
-                    // every requested version goes through this call instead of TableOptions.Version,
-                    // not only to work around version 0 but because a version-specific TableOptions
-                    // code path already proved untrustworthy once.
-                    await table.LoadVersionAsync(checked((ulong)v), ct).ConfigureAwait(false);
+                    try
+                    {
+                        // Confirmed against the real 0.33.0 package (a throwaway load against a table
+                        // with a schema-widening second commit, reflection-driven since there is no
+                        // public API surface for it otherwise): passing TableOptions.Version = 0 to
+                        // LoadTableAsync pins table.Version() correctly to 0, but table.Schema()/
+                        // table.Metadata() still reflect the table's LATEST commit, not version 0's --
+                        // a library bug specific to requesting version 0 through TableOptions. Calling
+                        // LoadVersionAsync AFTER a version-less load does not have this bug for any
+                        // version tested (0, 1, 2), so every requested version goes through this call
+                        // instead of TableOptions.Version, not only to work around version 0 but
+                        // because a version-specific TableOptions code path already proved
+                        // untrustworthy once.
+                        await table.LoadVersionAsync(checked((ulong)v), ct);
+                    }
+                    catch
+                    {
+                        // LoadTableAsync above already allocated a native table handle; a version
+                        // absent from the log (the ordinary case this catches) must not leak it just
+                        // because the failure happened one call later than it used to.
+                        if (table is IDisposable disposable)
+                        {
+                            disposable.Dispose();
+                        }
+
+                        throw;
+                    }
                 }
 
                 return table;

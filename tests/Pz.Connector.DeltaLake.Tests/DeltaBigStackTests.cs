@@ -55,6 +55,27 @@ public class DeltaBigStackTests
     }
 
     [Fact]
+    public async Task An_await_inside_the_delegate_resumes_on_the_same_big_stack_thread()
+    {
+        // The whole point of the gate: a delegate that sequences two delta-rs calls with a plain
+        // await between them (open-then-insert, load-then-pin-a-version) must keep BOTH calls on the
+        // big-stack thread, not just the one before the first await. Task.Run forces the antecedent
+        // task to complete on a genuine ThreadPool worker -- exactly how a real async delta-rs call
+        // completes -- so this reproduces the actual failure mode a Task.Yield() might not: a
+        // reviewer-instrumented run of the pre-fix code observed the continuation resume on a
+        // ".NET TP Worker" thread instead of "pz-deltalake" this way.
+        var (before, after) = await DeltaBigStack.RunAsync(async () =>
+        {
+            var beforeThread = Thread.CurrentThread;
+            await Task.Run(() => { });
+            return (Before: beforeThread, After: Thread.CurrentThread);
+        });
+
+        Assert.Same(before, after);
+        Assert.Equal("pz-deltalake", after.Name);
+    }
+
+    [Fact]
     public void The_stack_is_large_enough_that_the_environment_variable_is_unnecessary()
     {
         // 180000 is what DeltaLake.Net's own tests ask users to set via DOTNET_DefaultStackSize;
