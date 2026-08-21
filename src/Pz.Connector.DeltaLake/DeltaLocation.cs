@@ -39,10 +39,10 @@ internal static class DeltaLocation
             return DeltaScheme.Local;
         }
 
-        throw new PzConnectorException(
-            $"PZDL0101: deltalake connection 'root' must be an s3:// URI, an az://-family URI, or an " +
-            $"absolute local path (got '{root}'). Next step: set 'root' to one of those forms.",
-            isTransient: false);
+        throw DeltaErrors.Fail(DeltaErrors.UnsupportedRoot,
+            $"deltalake connection 'root' must be an s3:// URI, an az://-family URI, or an absolute " +
+            $"local path (got '{root}')",
+            "set 'root' to one of those forms");
     }
 
     public static string Resolve(string root, string entity, string? path)
