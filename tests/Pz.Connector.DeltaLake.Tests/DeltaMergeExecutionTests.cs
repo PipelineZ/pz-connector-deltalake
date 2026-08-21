@@ -147,32 +147,42 @@ public class DeltaMergeExecutionTests
     [Fact]
     public async Task An_escaped_column_name_would_constrain_a_different_column_and_duplicate_the_row()
     {
-        // Why a column name carrying a quote is refused rather than doubled. The table holds two
-        // columns whose names differ only by one level of doubling; the merge is keyed and partitioned
-        // on the second. Doubling that name to quote it makes the merge resolve it to the FIRST column,
-        // so the ON clause constrains the wrong column, the target row is invisible to the scan, and a
+        // Why a column name carrying a quote is refused rather than doubled, stated as a contrast. The
+        // table holds two columns whose names differ by one level of doubling, and the merge is keyed
+        // and partitioned on the second. The source carries that key column UNCHANGED, so a statement
+        // that names the column the merge actually resolves it by matches the existing row and updates
+        // it in place; the statement escaping produces names a column that resolves to the FIRST one,
+        // so the ON clause compares the wrong values, the target row is invisible to the scan, and a
         // second row with the same key is inserted.
         //
-        // The inserted row's own values are the clincher, not the count: the column that should have
+        // The inserted row's own values are the second half of the proof: the column that should have
         // received the second source column's value holds the FIRST one's instead, because the INSERT
         // clause mis-resolved the same way.
+        //
+        // The name doubled TWICE is not a supported spelling and is not offered as a workaround — it is
+        // here only because a contrast needs a control, and it is what the merge path's extra level of
+        // unescaping happens to accept today. If that ever changes, this control stops matching and
+        // this test fails, which is the right place for a reader to find out.
+        const string Resolves = "\"a\"\"\"\"\"\"\"\"b\"";
+        const string Escaped = "\"a\"\"\"\"b\"";
+
         var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
         try
         {
-            var location = await CreateTwoQuotedColumnsAsync(dir, ["a\"\"b"]);
-
             Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
                 () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id", "a\"\"b"], ["a\"\"b"]), null));
 
-            await MergeQuotedAsync(
-                location,
-                "MERGE INTO target USING source ON target.\"id\" = source.\"id\" " +
-                "AND target.\"a\"\"\"\"b\" = source.\"a\"\"\"\"b\" AND target.\"a\"\"\"\"b\" IN ('TWO')\n" +
-                "WHEN MATCHED THEN UPDATE SET target.\"a\"\"b\" = source.\"a\"\"b\"\n" +
-                "WHEN NOT MATCHED THEN INSERT (\"id\", \"a\"\"b\", \"a\"\"\"\"b\") VALUES " +
-                "(source.\"id\", source.\"a\"\"b\", source.\"a\"\"\"\"b\")");
+            var control = await CreateTwoQuotedColumnsAsync(dir, ["a\"\"b"], "control");
+            await MergeQuotedAsync(control, QuotedMerge(Resolves), QuotedNameRow("ONE-NEW", "TWO"));
 
-            var rows = await ReadTwoQuotedColumnsAsync(location);
+            var updated = Assert.Single(await ReadTwoQuotedColumnsAsync(control));
+            Assert.Equal("ONE-NEW", updated.First);
+            Assert.Equal("TWO", updated.Second);
+
+            var mangled = await CreateTwoQuotedColumnsAsync(dir, ["a\"\"b"], "mangled");
+            await MergeQuotedAsync(mangled, QuotedMerge(Escaped), QuotedNameRow("ONE-NEW", "TWO"));
+
+            var rows = await ReadTwoQuotedColumnsAsync(mangled);
             Assert.Equal(2, rows.Count);
             var inserted = Assert.Single(rows, r => r.Second == "ONE-NEW");
             Assert.Equal("ONE-NEW", inserted.First);
@@ -182,6 +192,15 @@ public class DeltaMergeExecutionTests
             Directory.Delete(dir, true);
         }
     }
+
+    /// <summary>The statement shape a merge keyed and partitioned on the second column produces, with
+    /// that column's name written as <paramref name="name"/> everywhere it appears.</summary>
+    private static string QuotedMerge(string name) =>
+        $"MERGE INTO target USING source ON target.\"id\" = source.\"id\" " +
+        $"AND target.{name} = source.{name} AND target.{name} IN ('TWO')\n" +
+        "WHEN MATCHED THEN UPDATE SET target.\"a\"\"b\" = source.\"a\"\"b\"\n" +
+        $"WHEN NOT MATCHED THEN INSERT (\"id\", \"a\"\"b\", {name}) VALUES " +
+        $"(source.\"id\", source.\"a\"\"b\", source.{name})";
 
     [Fact]
     public async Task An_escaped_column_name_would_leave_an_ordinary_column_stale_with_no_key_involved()
@@ -193,7 +212,7 @@ public class DeltaMergeExecutionTests
         var dir = Directory.CreateTempSubdirectory("pz-delta-merge-exec").FullName;
         try
         {
-            var location = await CreateTwoQuotedColumnsAsync(dir, []);
+            var location = await CreateTwoQuotedColumnsAsync(dir, [], "stale");
 
             Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
                 () => DeltaMergeSql.Build(QuotedNameSchema, Opts(["id"]), null));
@@ -204,7 +223,8 @@ public class DeltaMergeExecutionTests
                 "WHEN MATCHED THEN UPDATE SET target.\"a\"\"b\" = source.\"a\"\"b\", " +
                 "target.\"a\"\"\"\"b\" = source.\"a\"\"\"\"b\"\n" +
                 "WHEN NOT MATCHED THEN INSERT (\"id\", \"a\"\"b\", \"a\"\"\"\"b\") VALUES " +
-                "(source.\"id\", source.\"a\"\"b\", source.\"a\"\"\"\"b\")");
+                "(source.\"id\", source.\"a\"\"b\", source.\"a\"\"\"\"b\")",
+                QuotedNameRow("ONE-NEW", "TWO-NEW"));
 
             var row = Assert.Single(await ReadTwoQuotedColumnsAsync(location));
             Assert.Equal("ONE-NEW", row.First);
@@ -235,10 +255,11 @@ public class DeltaMergeExecutionTests
         return new RecordBatch(QuotedNameSchema, [id.Build(), a.Build(), b.Build()], 1);
     }
 
-    private static Task<string> CreateTwoQuotedColumnsAsync(string dir, string[] partitionBy) =>
+    private static Task<string> CreateTwoQuotedColumnsAsync(
+        string dir, string[] partitionBy, string name = "quoted") =>
         DeltaBigStack.RunAsync(async () =>
         {
-            var location = Path.Combine(dir, "quoted");
+            var location = Path.Combine(dir, name);
             using var engine = new DeltaEngine(EngineOptions.Default);
             var table = await engine.CreateTableAsync(
                 new TableCreateOptions(location, QuotedNameSchema)
@@ -250,12 +271,12 @@ public class DeltaMergeExecutionTests
             return location;
         });
 
-    private static Task MergeQuotedAsync(string location, string sql) =>
+    private static Task MergeQuotedAsync(string location, string sql, RecordBatch source) =>
         DeltaBigStack.RunAsync(async () =>
         {
             using var engine = new DeltaEngine(EngineOptions.Default);
             var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
-            await table.MergeAsync(sql, [QuotedNameRow("ONE-NEW", "TWO-NEW")], QuotedNameSchema, default);
+            await table.MergeAsync(sql, [source], QuotedNameSchema, default);
             return 0;
         });
 

@@ -283,6 +283,14 @@ public class DeltaMergeSqlTests
         var schema = new Apache.Arrow.Schema.Builder()
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
             .Field(f => f.Name("z\"col").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            // Two names differing only in case. Both are legal Delta column names, and both have to be
+            // reported: pooling them case-insensitively would name one, the user would rename it, rerun
+            // and be refused again for the other -- the per-run loop the aggregation exists to prevent.
+            .Field(f => f.Name("A\"b").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            .Field(f => f.Name("a\"B").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
+            // Sorts before 'a"B' ordinally and after it if case is folded -- the only pair here that
+            // can tell the report's ordering rule from a case-insensitive one.
+            .Field(f => f.Name("Z\"a").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Build();
 
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
@@ -294,6 +302,16 @@ public class DeltaMergeSqlTests
         Assert.Contains("'k\"key'", ex.Message);
         Assert.Contains("'p\"part'", ex.Message);
         Assert.Contains("'z\"col'", ex.Message);
+        Assert.Contains("'A\"b'", ex.Message);
+        Assert.Contains("'a\"B'", ex.Message);
+
+        // Ordered by the names themselves, ordinally, so two runs over the same schema produce the
+        // same message -- and so the order does not depend on which of columns, keys or partition
+        // columns a name happened to arrive from.
+        Assert.True(
+            ex.Message.IndexOf("'Z\"a'", StringComparison.Ordinal)
+                < ex.Message.IndexOf("'a\"B'", StringComparison.Ordinal),
+            $"offenders are not in ordinal order: {ex.Message}");
     }
 
     [Fact]
@@ -420,8 +438,6 @@ public class DeltaMergeSqlTests
     [InlineData("source.\"weird col\" = 1")]
     [InlineData("target.a_ = 'x'")]
     [InlineData("target.a1 = 'x'")]
-    // A '"' inside a quoted column name is written doubled, and has to be read back as one character
-    // before the name can be matched against the schema.
     // A column whose name is not all lower case is reachable by writing its name, in its own case,
     // either bare or quoted — which is what the merge path resolves.
     [InlineData("target.Amt >= 0")]

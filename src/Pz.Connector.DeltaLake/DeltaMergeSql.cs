@@ -378,10 +378,15 @@ internal static class DeltaMergeSql
     }
 
     /// <summary>Reads one word — a bare identifier or a '"'-quoted one — advancing
-    /// <paramref name="i"/> past it and yielding the name with the quoting removed, plus whether it was
-    /// quoted, which decides whether it may be a keyword. False if there is no word there, if a quoted
-    /// one never closes, or if a '"' sits directly after an identifier character, which is the
-    /// string-prefix shape refused above.</summary>
+    /// <paramref name="i"/> past it and yielding the name with the delimiters removed, plus whether it
+    /// was quoted, which decides whether it may be a keyword. False if there is no word there, if a
+    /// quoted one never closes, or if a '"' sits directly after an identifier character, which is the
+    /// string-prefix shape refused above.
+    ///
+    /// A doubled '"' inside the delimiters is NOT read back as one character. It cannot name anything:
+    /// <see cref="RefuseUnquotableNames"/> has already refused every schema whose column names contain
+    /// a quote, so a word carrying one matches no column either way and falls through to the refusal at
+    /// the end of the scan.</summary>
     private static bool TryReadWord(string s, ref int i, out string word, out bool quoted)
     {
         word = string.Empty;
@@ -406,7 +411,7 @@ internal static class DeltaMergeSql
                 return false;
             }
 
-            word = s[(i + 1)..(end - 1)].Replace("\"\"", "\"");
+            word = s[(i + 1)..(end - 1)];
             i = end;
             return true;
         }
