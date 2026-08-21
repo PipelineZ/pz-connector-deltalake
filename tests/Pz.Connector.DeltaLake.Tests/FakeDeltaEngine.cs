@@ -49,6 +49,8 @@ internal sealed class FakeDeltaTable : ITable
     public Func<ulong, CancellationToken, Task> OnLoadVersionAsync { get; set; } =
         (_, _) => throw NotConfigured();
 
+    public Func<TableMetadata> OnMetadata { get; set; } = () => throw NotConfigured();
+
     public Action OnDispose { get; set; } = () => { };
 
     public string Location() => throw NotConfigured();
@@ -57,7 +59,7 @@ internal sealed class FakeDeltaTable : ITable
 
     public Schema Schema() => this.OnSchema();
 
-    public TableMetadata Metadata() => throw NotConfigured();
+    public TableMetadata Metadata() => this.OnMetadata();
 
     public ProtocolInfo ProtocolVersions() => throw NotConfigured();
 

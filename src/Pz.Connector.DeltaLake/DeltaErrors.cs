@@ -20,6 +20,12 @@ internal static class DeltaErrors
     public const string CalendarTokenInReadPath = "PZDL0106";
     public const string InvalidMergePredicate = "PZDL0107";
 
+    /// <summary>An output option this connector cannot act on — an unrecognized name, a value of the
+    /// wrong shape, or one outside the range delta-rs accepts. Offline config, not a runtime write
+    /// failure: it is decided from the OutputSpec alone, before anything is opened, so it belongs in
+    /// this family rather than alongside PZDL0404's storage-layer causes.</summary>
+    public const string InvalidWriteOption = "PZDL0108";
+
     // Read.
     public const string TableUnreadable = "PZDL0201";
     public const string VersionNotFound = "PZDL0202";
@@ -41,7 +47,8 @@ internal static class DeltaErrors
     public static readonly IReadOnlyList<string> AllCodes =
     [
         UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, KeysOverlapPartitions, VersionOnWrite,
-        CalendarTokenInReadPath, InvalidMergePredicate, TableUnreadable, VersionNotFound, SchemaMismatch,
+        CalendarTokenInReadPath, InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
+        SchemaMismatch,
         UnwritableArrowType, MergeKeyNotInSchema, CommitConflict, DuplicateMergeKeys, UnsafeConcurrentS3,
         WriteFailed, UnsupportedProtocol,
     ];

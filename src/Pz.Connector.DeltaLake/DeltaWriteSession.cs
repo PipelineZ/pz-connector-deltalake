@@ -130,12 +130,10 @@ internal sealed class DeltaWriteSession(
         }
 
         var payload = this.buffered.ToArray();
-        // MaxRowsPerGroup is init-only, and leaving it unset is not the same as setting it: an
-        // unconfigured output must keep whatever default DeltaLake.Net applies, so the two shapes are
-        // constructed separately rather than assigned after the fact.
-        var insert = options.MaxRowsPerGroup is { } maxRows
-            ? new InsertOptions { SaveMode = mode, MaxRowsPerGroup = (ulong)maxRows }
-            : new InsertOptions { SaveMode = mode };
+        // MaxRowsPerGroup is left at DeltaLake.Net's own default: setting it was measured to change
+        // nothing about the parquet the writer emits, so this connector does not expose a knob for it
+        // (see DeltaLakeSchemas.WriteOptions).
+        var insert = new InsertOptions { SaveMode = mode };
 
         try
         {
@@ -174,7 +172,14 @@ internal sealed class DeltaWriteSession(
         }
     }
 
-    private Task MergeAsync(CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Merge lands in a later task. Until then it refuses with a code rather than a bare
+    /// NotImplementedException: pz carries a connector failure through <c>catch
+    /// (PzConnectorException)</c>, so an uncoded exception here would escape as a fatal with no output
+    /// name and no next step — after BeginWriteAsync has already created the table.</summary>
+    private Task MergeAsync(CancellationToken ct) =>
+        throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
+            $"output '{output}': strategy 'merge' is not implemented by this connector yet",
+            "use strategy: append or replace, or pin a connector version whose release notes list merge");
 
     private void Clear()
     {

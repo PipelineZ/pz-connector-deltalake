@@ -1,6 +1,8 @@
+using System.Runtime.CompilerServices;
 using Apache.Arrow;
 using Apache.Arrow.Types;
 using DeltaLake.Errors;
+using DeltaLake.Interfaces;
 using DeltaLake.Table;
 using Pz.Connectors.Abstractions;
 using Xunit;
@@ -159,10 +161,14 @@ public class WriteSessionTests
         var spec = Out() with { SchemaPolicy = "evolve" };
         await using (var session = await sink.BeginWriteAsync(spec, DeltaTestTable.WiderSchema, default))
         {
-            await session.CommitAsync(default);
+            // Committing no batches would flush nothing, and the count below would just be the
+            // fixture's starting rows — proving only that the guard stood aside, not that the write
+            // landed through the widened schema.
+            await session.WriteBatchAsync(DeltaTestTable.WiderRows(3), default);
+            Assert.Equal(3, (await session.CommitAsync(default)).RowsWritten);
         }
 
-        Assert.Equal(4, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
+        Assert.Equal(7, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
     }
 
     [Fact]
@@ -199,7 +205,7 @@ public class WriteSessionTests
             {
                 ["partition_by"] = new List<object?> { "dt" },
                 ["merge_predicate"] = "dt >= '2026-01-01'",
-                ["max_rows_per_group"] = 65536L,
+                ["target_file_bytes"] = 65536L,
             })
         { Keys = ["id"] });
 
@@ -207,8 +213,13 @@ public class WriteSessionTests
         Assert.Equal(["id"], opts.Keys);
         Assert.Equal(["dt"], opts.PartitionBy);
         Assert.Equal("dt >= '2026-01-01'", opts.MergePredicate);
-        Assert.Equal(65536L, opts.MaxRowsPerGroup);
-        Assert.True(opts.TargetFileBytes > 0);
+        Assert.Equal(65536L, opts.TargetFileBytes);
+
+        // Every name in the declared list is read by From, so a name can never be validated and then
+        // ignored — the failure this whole surface exists to prevent.
+        Assert.Equal(
+            ["merge_predicate", "partition_by", "path", "target_file_bytes"],
+            DeltaLakeSchemas.WriteOptions.Order(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -229,8 +240,22 @@ public class WriteSessionTests
         var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
             new OutputSpec("lake", "orders", "append", "fail_on_change",
                 new Dictionary<string, object?> { ["partiton_by"] = new List<object?> { "dt" } })));
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
         Assert.Contains("partiton_by", ex.Message);
         Assert.Contains("partition_by", ex.Message);
+    }
+
+    [Fact]
+    public void An_option_problem_carries_a_config_code_not_the_runtime_write_code()
+    {
+        // PZDL0404 is the runtime family — a storage-layer write failure. An option problem is decided
+        // from the OutputSpec alone, before anything is opened, and a troubleshooting entry that has to
+        // explain both causes under one code helps nobody.
+        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["nonsense"] = 1L })));
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.DoesNotContain(DeltaErrors.WriteFailed, ex.Message);
     }
 
     [Fact]
@@ -243,12 +268,12 @@ public class WriteSessionTests
                 new Dictionary<string, object?>
                 {
                     ["partiton_by"] = new List<object?> { "dt" },
-                    ["targt_file_bytes"] = 1L,
-                    ["max_rows_per_group"] = "lots",
+                    ["merge_predicat"] = "x",
+                    ["target_file_bytes"] = "lots",
                 })));
         Assert.Contains("partiton_by", ex.Message);
-        Assert.Contains("targt_file_bytes", ex.Message);
-        Assert.Contains("max_rows_per_group", ex.Message);
+        Assert.Contains("merge_predicat", ex.Message);
+        Assert.Contains("target_file_bytes", ex.Message);
     }
 
     [Fact]
@@ -272,47 +297,50 @@ public class WriteSessionTests
     }
 
     [Fact]
-    public void A_non_numeric_max_rows_per_group_is_a_coded_refusal_not_a_format_exception()
+    public void A_non_numeric_target_file_bytes_is_a_coded_refusal_not_a_format_exception()
     {
         // Convert.ToInt64 would raise FormatException, which pz's `catch (PzConnectorException)` does
         // not carry — the failure would reach the user without a code, a node name or a next step.
         var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
             new OutputSpec("lake", "orders", "append", "fail_on_change",
-                new Dictionary<string, object?> { ["max_rows_per_group"] = "lots" })));
-        Assert.Contains("max_rows_per_group", ex.Message);
-        Assert.Contains("lots", ex.Message);
-        Assert.Contains("PZDL", ex.Message);
-    }
-
-    [Fact]
-    public void A_max_rows_per_group_beyond_int_range_is_carried_not_truncated()
-    {
-        // Narrowing to int would silently turn 4294967296 into 0 and hand delta-rs a value its Rust
-        // writer panics on.
-        var opts = DeltaWriteOptions.From(new OutputSpec("lake", "orders", "append", "fail_on_change",
-            new Dictionary<string, object?> { ["max_rows_per_group"] = 4294967296L }));
-        Assert.Equal(4294967296L, opts.MaxRowsPerGroup);
-    }
-
-    [Fact]
-    public void A_zero_max_rows_per_group_is_refused_because_the_rust_writer_panics_on_it()
-    {
-        // Observed against DeltaLake.Net 0.33.0: MaxRowsPerGroup = 0 aborts the write with a Rust
-        // panic ("assertion failed: step != 0") rather than an error the engine can report.
-        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
-            new OutputSpec("lake", "orders", "append", "fail_on_change",
-                new Dictionary<string, object?> { ["max_rows_per_group"] = 0L })));
-        Assert.Contains("max_rows_per_group", ex.Message);
-    }
-
-    [Fact]
-    public void A_non_numeric_target_file_bytes_is_a_coded_refusal()
-    {
-        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
-            new OutputSpec("lake", "orders", "append", "fail_on_change",
                 new Dictionary<string, object?> { ["target_file_bytes"] = "128MB" })));
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
         Assert.Contains("target_file_bytes", ex.Message);
         Assert.Contains("128MB", ex.Message);
+    }
+
+    [Fact]
+    public void A_target_file_bytes_beyond_int_range_is_carried_not_truncated()
+    {
+        // A byte count routinely exceeds int.MaxValue; narrowing would silently turn 4 GiB into 0 and
+        // flush a generation after every batch.
+        var opts = DeltaWriteOptions.From(new OutputSpec("lake", "orders", "append", "fail_on_change",
+            new Dictionary<string, object?> { ["target_file_bytes"] = 4294967296L }));
+        Assert.Equal(4294967296L, opts.TargetFileBytes);
+    }
+
+    [Fact]
+    public void A_zero_target_file_bytes_is_refused_rather_than_flushing_after_every_batch()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["target_file_bytes"] = 0L })));
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.Contains("target_file_bytes", ex.Message);
+    }
+
+    [Fact]
+    public void Max_rows_per_group_is_refused_because_setting_it_was_measured_to_do_nothing()
+    {
+        // Measured against DeltaLake.Net 0.33.0: 100,000 rows land in one parquet row group of 100,000
+        // whether InsertOptions.MaxRowsPerGroup is unset or 1000. Accepting the option would make it a
+        // validated no-op that reads like a working setting — the same silent failure as an unvalidated
+        // one, just relocated. It comes back when it demonstrably shapes a row group.
+        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["max_rows_per_group"] = 1000L })));
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.Contains("unknown write option 'max_rows_per_group'", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -549,16 +577,287 @@ public class WriteSessionTests
     }
 
     [Fact]
-    public async Task A_cancelled_begin_neither_creates_a_table_nor_reports_a_delta_failure()
+    public async Task A_cancelled_begin_surfaces_cancellation_rather_than_a_permanent_write_failure()
     {
+        // Named for what it actually guards. It is NOT evidence about the open-versus-create decision:
+        // with an already-cancelled token a create attempt would fail identically, so a sink that
+        // swallowed every load failure and created regardless would pass this test unchanged. The
+        // seam-driven tests below are what discriminate that.
         var dir = TempDir("pz-delta-cancel");
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
 
         await using var sink = await OpenSink(dir);
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await sink.BeginWriteAsync(Out(), DeltaTestTable.Schema, cts.Token));
+        Assert.IsNotAssignableFrom<PzConnectorException>(ex);
+        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
+    }
+
+    [Fact]
+    public async Task An_absent_table_is_created()
+    {
+        var (engine, created) = EngineThatFails(
+            new DeltaRuntimeException("Not a Delta table: …", DeltaLakeSink.TableAbsentErrorCode));
+        await using var sink = new DeltaLakeSink(Cfg("/mnt/lake"), () => engine);
+
+        await using var session = await sink.BeginWriteAsync(Out(), DeltaTestTable.Schema, default);
+        Assert.True(created.Value, "an absent table must lead to a create");
+    }
+
+    [Fact]
+    public async Task A_storage_failure_at_open_is_reported_transiently_rather_than_retried_as_a_create()
+    {
+        // The stake in ruling 4's discriminator: a bare catch turns this retryable failure into a
+        // create attempt, and reports whatever the create said — permanently.
+        var (engine, created) = EngineThatFails(
+            new DeltaRuntimeException("Kernel error: object store error: connection refused", 30));
+        await using var sink = new DeltaLakeSink(Cfg("/mnt/lake"), () => engine);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out(), DeltaTestTable.Schema, default));
+        Assert.False(created.Value, "a non-absent load failure must never reach a create");
+        Assert.Contains("open of output 'orders'", ex.Message, StringComparison.Ordinal);
+        Assert.True(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task Cancellation_arriving_during_the_open_never_reaches_a_create()
+    {
+        // Cancelling AS the load fails is what an already-cancelled token cannot show: the create is
+        // left able to succeed, so a sink that reached it would return a session instead of throwing,
+        // and would flip the flag.
+        using var cts = new CancellationTokenSource();
+        var (engine, created) = EngineThatFails(new OperationCanceledException(), onLoad: () => cts.Cancel());
+        await using var sink = new DeltaLakeSink(Cfg("/mnt/lake"), () => engine);
+
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await sink.BeginWriteAsync(Out(), DeltaTestTable.Schema, cts.Token));
-        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
+        Assert.False(created.Value, "a cancelled open must never reach a create");
+    }
+
+    /// <summary>An engine whose load always fails with <paramref name="failure"/> and whose create
+    /// always succeeds, returning a table shaped like the fixture. The flag records whether the create
+    /// was reached at all — the one thing no arrangement of real files can observe, because a create
+    /// over a location delta-rs refuses to load always fails too.</summary>
+    private static (FakeDeltaEngine Engine, StrongBox<bool> Created) EngineThatFails(
+        Exception failure, Action? onLoad = null)
+    {
+        var created = new StrongBox<bool>(false);
+        var engine = new FakeDeltaEngine
+        {
+            OnLoadTableAsync = (_, _) =>
+            {
+                onLoad?.Invoke();
+                throw failure;
+            },
+            OnCreateTableAsync = (_, _) =>
+            {
+                created.Value = true;
+                return Task.FromResult<ITable>(new FakeDeltaTable
+                {
+                    OnSchema = () => DeltaTestTable.Schema,
+                    // TableMetadata.PartitionColumns has no public setter, so this double reports the
+                    // null a caller must already tolerate; no test through this seam declares
+                    // partition_by, so the comparison is not what is under test here.
+                    OnMetadata = () => new TableMetadata(),
+                });
+            },
+        };
+
+        return (engine, created);
+    }
+
+    [Fact]
+    public async Task Begin_refuses_partition_by_on_a_table_that_was_created_unpartitioned()
+    {
+        // partition_by only ever reaches CreateTableAsync, so on an existing table it is inert: without
+        // this guard the run succeeds, writes no partition directories, says nothing, and every
+        // partition-pruned read against the table silently full-scans from then on.
+        var dir = TempDir("pz-delta-repartition");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4);
+
+        await using var sink = await OpenSink(dir);
+        var spec = Out("append", ("partition_by", new List<object?> { "dt" }));
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default));
+
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("partition_by declares [dt]", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("not partitioned", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetDirectories(Path.Combine(dir, "orders"), "dt=*"));
+    }
+
+    [Fact]
+    public async Task Begin_refuses_partition_by_that_names_different_columns_than_the_table()
+    {
+        var dir = TempDir("pz-delta-repartition2");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4, partitionBy: ["dt"]);
+
+        await using var sink = await OpenSink(dir);
+        var spec = Out("append", ("partition_by", new List<object?> { "id" }));
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default));
+
+        Assert.Contains("partition_by declares [id]", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("partitioned by [dt]", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_partition_by_matching_the_existing_table_is_accepted()
+    {
+        // The refusal above must be a mismatch guard, not a blanket ban on declaring partition_by
+        // against a table that already exists — which every run after the first one does.
+        var dir = TempDir("pz-delta-repartition3");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4, partitionBy: ["dt"]);
+
+        await using var sink = await OpenSink(dir);
+        var spec = Out("append", ("partition_by", new List<object?> { "dt" }));
+        await using (var session = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default))
+        {
+            await session.WriteBatchAsync(DeltaTestTable.Rows(100, 8), default);
+            await session.CommitAsync(default);
+        }
+
+        Assert.Equal(12, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
+    }
+
+    [Fact]
+    public async Task Begin_refuses_a_write_that_omits_a_nullable_table_column()
+    {
+        // delta-rs accepts this and null-fills, silently: a pipeline that stops selecting a column
+        // would keep writing, filling it with nulls forever, with no diagnostic anywhere.
+        var dir = TempDir("pz-delta-omit-nullable");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4);
+
+        await using var sink = await OpenSink(dir);
+        var withoutAmt = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+            .Build();
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out(), withoutAmt, default));
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("amt", ex.Message);
+    }
+
+    [Fact]
+    public async Task Schema_policy_evolve_allows_omitting_a_nullable_column_but_never_a_non_nullable_one()
+    {
+        var dir = TempDir("pz-delta-omit-evolve");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4);
+        await using var sink = await OpenSink(dir);
+
+        var withoutAmt = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+            .Build();
+        await using (var session = await sink.BeginWriteAsync(
+            Out() with { SchemaPolicy = "evolve" }, withoutAmt, default))
+        {
+            await session.CommitAsync(default);
+        }
+
+        // 'dt' is NOT NULL in the table. delta-rs refuses that one itself — but only at insert time,
+        // with a preview of the offending rows, after the table exists and after any earlier flushed
+        // generation has already committed. "evolve" cannot wave through what delta-rs will not accept.
+        var withoutDt = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
+            .Build();
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out() with { SchemaPolicy = "evolve" }, withoutDt, default));
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("dt", ex.Message);
+        Assert.Contains("NOT NULL", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Merge_is_refused_with_a_code_until_it_is_implemented()
+    {
+        // A bare NotImplementedException would escape pz's `catch (PzConnectorException)` as a fatal
+        // with no output name and no next step — after BeginWriteAsync already created the table.
+        var dir = TempDir("pz-delta-merge-todo");
+        await using var sink = await OpenSink(dir);
+        await using var session = await sink.BeginWriteAsync(
+            Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default);
+        await session.WriteBatchAsync(DeltaTestTable.Rows(0, 4), default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await session.CommitAsync(default));
+        Assert.Contains("PZDL", ex.Message);
+        Assert.Contains("merge", ex.Message);
+    }
+
+    [Fact]
+    public async Task Begin_refuses_two_timestamps_that_differ_only_in_unit_and_timezone()
+    {
+        // Delta stores exactly one timestamp shape, so the table's is always microseconds in UTC; a
+        // comparison on ArrowTypeId alone would let a millisecond, zoneless column straight through.
+        var dir = TempDir("pz-delta-ts");
+        await CreateLocalAsync(dir, new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("at").DataType(new TimestampType(TimeUnit.Microsecond, "UTC")).Nullable(true))
+            .Build());
+
+        await using var sink = await OpenSink(dir);
+        var incoming = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("at").DataType(new TimestampType(TimeUnit.Millisecond, (string?)null)).Nullable(true))
+            .Build();
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out(), incoming, default));
+        Assert.Contains("timestamp[Microsecond, tz=UTC]", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("timestamp[Millisecond]", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Begin_refuses_a_list_whose_element_type_differs()
+    {
+        var dir = TempDir("pz-delta-list");
+        await CreateLocalAsync(dir, new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("tags").DataType(new ListType(new Field("element", Int64Type.Default, true)))
+                .Nullable(true))
+            .Build());
+
+        await using var sink = await OpenSink(dir);
+        var incoming = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("tags").DataType(new ListType(new Field("element", StringType.Default, true)))
+                .Nullable(true))
+            .Build();
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out(), incoming, default));
+        Assert.Contains("list<int64>", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("list<utf8>", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Begin_refuses_a_struct_whose_field_type_differs()
+    {
+        var dir = TempDir("pz-delta-struct");
+        await CreateLocalAsync(dir, new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("who").DataType(new StructType(
+                [new Field("name", StringType.Default, true), new Field("age", Int64Type.Default, true)]))
+                .Nullable(true))
+            .Build());
+
+        await using var sink = await OpenSink(dir);
+        var incoming = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("who").DataType(new StructType(
+                [new Field("name", StringType.Default, true), new Field("age", StringType.Default, true)]))
+                .Nullable(true))
+            .Build();
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out(), incoming, default));
+        Assert.Contains("struct<name: utf8, age: int64>", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("struct<name: utf8, age: utf8>", ex.Message, StringComparison.Ordinal);
     }
 
     private static Task<string> CreateLocalAsync(string dir, Schema schema) =>

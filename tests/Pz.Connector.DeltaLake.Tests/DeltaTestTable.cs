@@ -56,7 +56,7 @@ internal static class DeltaTestTable
         .Field(f => f.Name("note").DataType(StringType.Default).Nullable(true))
         .Build();
 
-    private static RecordBatch WiderRows(long count)
+    public static RecordBatch WiderRows(long count)
     {
         var id = new Int64Array.Builder();
         var dt = new StringArray.Builder();

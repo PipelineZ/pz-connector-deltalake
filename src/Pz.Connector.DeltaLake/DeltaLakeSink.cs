@@ -16,8 +16,7 @@ internal sealed record DeltaWriteOptions(
     IReadOnlyList<string> Keys,
     IReadOnlyList<string> PartitionBy,
     string? MergePredicate,
-    long TargetFileBytes,
-    long? MaxRowsPerGroup)
+    long TargetFileBytes)
 {
     /// <summary>128 MiB: large enough that an ordinary append lands one file per generation, small
     /// enough that a large append does not hold the whole write in memory.</summary>
@@ -33,7 +32,6 @@ internal sealed record DeltaWriteOptions(
         var partitionBy = StringList(spec, "partition_by", problems);
         var mergePredicate = Text(spec, "merge_predicate", problems);
         var targetFileBytes = PositiveInt64(spec, "target_file_bytes", problems);
-        var maxRowsPerGroup = PositiveInt64(spec, "max_rows_per_group", problems);
 
         if (spec.Mode == "merge" && spec.Keys.Count == 0)
         {
@@ -48,8 +46,7 @@ internal sealed record DeltaWriteOptions(
         }
 
         return new DeltaWriteOptions(
-            spec.Mode, spec.Keys, partitionBy, mergePredicate,
-            targetFileBytes ?? DefaultTargetFileBytes, maxRowsPerGroup);
+            spec.Mode, spec.Keys, partitionBy, mergePredicate, targetFileBytes ?? DefaultTargetFileBytes);
     }
 
     /// <summary>The only validation output options ever get: pz schema-validates source dataset
@@ -70,7 +67,7 @@ internal sealed record DeltaWriteOptions(
 
             if (key == "mode")
             {
-                problems.Add(new Problem(DeltaErrors.WriteFailed,
+                problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                     "'mode' is not a write option",
                     "use pz's own 'strategy' instead — strategy: append | replace | merge"));
                 continue;
@@ -85,7 +82,7 @@ internal sealed record DeltaWriteOptions(
             }
 
             var suggestion = DeltaLakeSchemas.WriteOptions.OrderBy(o => Distance(o, key)).First();
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"unknown write option '{key}'",
                 $"did you mean '{suggestion}'? Known write options: " +
                 string.Join(", ", DeltaLakeSchemas.WriteOptions)));
@@ -139,7 +136,7 @@ internal sealed record DeltaWriteOptions(
 
         if (value is string or not System.Collections.IEnumerable)
         {
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"write option '{key}' must be a list of column names (got the single value '{value}')",
                 $"write it as a list — {key}: [{value}]"));
             return [];
@@ -149,7 +146,7 @@ internal sealed record DeltaWriteOptions(
             .Select(x => x?.ToString() ?? string.Empty).ToList();
         if (items.Any(string.IsNullOrWhiteSpace))
         {
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"write option '{key}' contains an empty column name",
                 $"remove the empty entry from {key}"));
             return [];
@@ -167,7 +164,7 @@ internal sealed record DeltaWriteOptions(
 
         if (value is not string text)
         {
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"write option '{key}' must be a string (got '{value}')",
                 $"quote the value of {key}"));
             return null;
@@ -178,11 +175,10 @@ internal sealed record DeltaWriteOptions(
 
     /// <summary>A whole-number option. Convert.ToInt64 is deliberately not used: it raises
     /// FormatException/OverflowException, which is not a PzConnectorException and so reaches the user
-    /// with no code, no output name and no next step. Zero and negatives are refused here rather than
-    /// passed on — DeltaLake.Net 0.33.0 aborts the write with a Rust panic on a
-    /// <c>max_rows_per_group</c> of 0, and a non-positive file target would flush after every batch.
-    /// The value stays a long: <see cref="InsertOptions.MaxRowsPerGroup"/> is 64-bit, so narrowing to
-    /// int would silently truncate anything above int.MaxValue to a number the writer cannot use.</summary>
+    /// with no code, no output name and no next step. The value stays a long because a byte count
+    /// routinely exceeds int.MaxValue and narrowing would silently truncate it. Zero and negatives are
+    /// refused rather than passed on: a non-positive file target would flush a generation after every
+    /// single batch.</summary>
     private static long? PositiveInt64(OutputSpec spec, string key, List<Problem> problems)
     {
         if (!spec.Options.TryGetValue(key, out var value) || value is null)
@@ -193,7 +189,7 @@ internal sealed record DeltaWriteOptions(
         var text = value as string ?? Convert.ToString(value, CultureInfo.InvariantCulture);
         if (!long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
         {
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"write option '{key}' must be a whole number (got '{value}')",
                 $"set {key} to a positive whole number"));
             return null;
@@ -201,7 +197,7 @@ internal sealed record DeltaWriteOptions(
 
         if (parsed <= 0)
         {
-            problems.Add(new Problem(DeltaErrors.WriteFailed,
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
                 $"write option '{key}' must be greater than zero (got {parsed})",
                 $"set {key} to a positive whole number"));
             return null;
@@ -214,7 +210,7 @@ internal sealed record DeltaWriteOptions(
 /// <summary>The write half, on the universal Arrow path. There is no native-copy alternative: DuckDB's
 /// delta extension is read-only, and the engine's native-COPY branch never opens a write session, so
 /// there would be no point at which a Delta commit could happen.</summary>
-internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
+internal sealed class DeltaLakeSink : ISink
 {
     /// <summary>delta-rs's own <c>NotATable</c> error code — the ONE load failure that means "create
     /// it". DeltaLake.Net 0.33.0 keeps its <c>DeltaTableErrorCode</c> enum internal, so the value is
@@ -231,12 +227,31 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
     /// included, refuses.</summary>
     private const string EvolvingSchemaPolicy = "evolve";
 
+    private readonly ConnectorConfig config;
+
     // Lazy<Task<T>> rather than Lazy<T>: constructing the engine is itself a delta-rs call and so must
     // run on DeltaBigStack's oversized stack, but Lazy<T>'s factory has to be synchronous. Wrapping the
     // Task keeps construction on the big-stack thread while still amortizing it to one attempt under
     // concurrent first access. Same shape DeltaLakeSource uses.
-    private readonly Lazy<Task<DeltaEngine>> engine =
-        new(() => DeltaBigStack.RunAsync(() => Task.FromResult(new DeltaEngine(EngineOptions.Default))));
+    private readonly Lazy<Task<IEngine>> engine;
+
+    public DeltaLakeSink(ConnectorConfig config)
+        : this(config, () => new DeltaEngine(EngineOptions.Default))
+    {
+    }
+
+    /// <summary>Takes the engine as a factory so the load-then-create decision in
+    /// <see cref="OpenOrCreateAsync"/> can be exercised against an engine whose failures are chosen
+    /// rather than provoked. Which delta-rs failures do and do not mean "there is no table here" is the
+    /// single most consequential branch in this file — a wrong answer turns a wrong credential into a
+    /// create attempt — and no arrangement of real files can make a load fail one way while a create at
+    /// the same location would have succeeded, so the branch is otherwise only half observable.</summary>
+    internal DeltaLakeSink(ConnectorConfig config, Func<IEngine> engineFactory)
+    {
+        this.config = config;
+        this.engine = new Lazy<Task<IEngine>>(
+            () => DeltaBigStack.RunAsync(() => Task.FromResult(engineFactory())));
+    }
 
     /// <summary>An append session flushes bounded generations to keep memory proportional to a file
     /// rather than to the whole write, and a flushed generation is already committed — abort cannot
@@ -266,17 +281,18 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
         }
 
         var location = DeltaLocation.Resolve(
-            config.GetString("root") ?? string.Empty, spec.Output,
+            this.config.GetString("root") ?? string.Empty, spec.Output,
             spec.Options.TryGetValue("path", out var p) ? p?.ToString() : null);
 
         var table = await this.OpenOrCreateAsync(location, schema, options, spec.Output, ct).ConfigureAwait(false);
         try
         {
-            // Schema() is the synchronous, deeply-recursive delta-rs call DeltaBigStack exists for; it
-            // is fetched inside the gate and Reconcile compares the result on the caller's thread.
-            var tableSchema = await DeltaBigStack.RunAsync(() => Task.FromResult(table.Schema()))
-                .ConfigureAwait(false);
-            Reconcile(schema, tableSchema, spec);
+            // Schema() and Metadata() are the synchronous, deeply-recursive delta-rs calls
+            // DeltaBigStack exists for; both are fetched inside one pass through the gate and Reconcile
+            // compares the results on the caller's thread.
+            var existing = await DeltaBigStack.RunAsync(
+                () => Task.FromResult((table.Schema(), table.Metadata().PartitionColumns))).ConfigureAwait(false);
+            Reconcile(schema, existing.Item1, existing.Item2, options, spec);
             return new DeltaWriteSession(table, schema, options, spec.Output);
         }
         catch (Exception ex)
@@ -293,7 +309,7 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
             return;
         }
 
-        DeltaEngine engine;
+        IEngine engine;
         try
         {
             engine = await this.engine.Value.ConfigureAwait(false);
@@ -312,18 +328,48 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
         }).ConfigureAwait(false);
     }
 
-    /// <summary>Fails a write whose incoming columns do not match the table's, naming the column and
-    /// both types — a Rust-side type error names neither the column nor the output.</summary>
-    private static void Reconcile(Schema incoming, Schema table, OutputSpec spec)
+    /// <summary>Fails a write whose shape does not match the table it is about to write into, naming
+    /// the column and both types — a Rust-side type error names neither the column nor the output, and
+    /// three of the mismatches below produce no error at all.
+    ///
+    /// Partitioning is compared here and nowhere else. <c>partition_by</c> is honoured only by
+    /// CreateTableAsync, so on a table an earlier run already created it is inert: the run succeeds,
+    /// writes no partition directories, reports nothing, and every partition-pruned read against that
+    /// table quietly full-scans. Delta cannot repartition a table in place, so the only honest
+    /// outcome is to refuse.
+    ///
+    /// A table column the write does NOT produce is compared here for the same reason. delta-rs fills
+    /// a missing NULLABLE column with nulls and says nothing — a pipeline that stops selecting a column
+    /// silently null-fills it from then on — and fails a missing NON-NULLABLE one only at insert time,
+    /// with a row-data preview, after the table exists and after any earlier flushed generation has
+    /// already committed. Under the default schema_policy both are refused; "evolve" is the opt-in that
+    /// lets the write's own shape govern, and even it cannot wave through a missing non-nullable
+    /// column, because delta-rs itself will not.</summary>
+    private static void Reconcile(
+        Schema incoming, Schema table, IReadOnlyList<string>? tablePartitions,
+        DeltaWriteOptions options, OutputSpec spec)
     {
         var byName = table.FieldsList.ToDictionary(f => f.Name, StringComparer.Ordinal);
+        var incomingNames = incoming.FieldsList.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
         var problems = new List<string>();
+        var evolving = spec.SchemaPolicy == EvolvingSchemaPolicy;
+
+        var declaredPartitions = options.PartitionBy;
+        var actualPartitions = tablePartitions ?? [];
+        if (declaredPartitions.Count > 0 && !declaredPartitions.SequenceEqual(actualPartitions, StringComparer.Ordinal))
+        {
+            problems.Add(
+                $"partition_by declares [{string.Join(", ", declaredPartitions)}] but the existing table is " +
+                (actualPartitions.Count == 0
+                    ? "not partitioned"
+                    : $"partitioned by [{string.Join(", ", actualPartitions)}]"));
+        }
 
         foreach (var field in incoming.FieldsList)
         {
             if (!byName.TryGetValue(field.Name, out var existing))
             {
-                if (spec.SchemaPolicy != EvolvingSchemaPolicy)
+                if (!evolving)
                 {
                     problems.Add($"column '{field.Name}' is not in the table");
                 }
@@ -344,12 +390,29 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
             }
         }
 
+        foreach (var field in table.FieldsList.Where(f => !incomingNames.Contains(f.Name)))
+        {
+            if (!field.IsNullable)
+            {
+                problems.Add(
+                    $"column '{field.Name}' is NOT NULL in the table but the data being written has no such column");
+            }
+            else if (!evolving)
+            {
+                problems.Add(
+                    $"column '{field.Name}' is in the table but not in the data being written, so every " +
+                    "written row would be null there");
+            }
+        }
+
         if (problems.Count > 0)
         {
             throw DeltaErrors.Fail(DeltaErrors.SchemaMismatch,
                 $"output '{spec.Output}': {string.Join("; ", problems)}",
-                $"cast the columns in the pipeline SQL, or set schema_policy: {EvolvingSchemaPolicy} on " +
-                "the output to let the write add a column the table does not have");
+                $"cast or select the columns in the pipeline SQL to match the table; set schema_policy: " +
+                $"{EvolvingSchemaPolicy} to let the write add a column the table lacks or leave a nullable " +
+                "one null; a partitioning change needs a new table, because Delta cannot repartition one " +
+                "in place");
         }
     }
 
@@ -402,7 +465,7 @@ internal sealed class DeltaLakeSink(ConnectorConfig config) : ISink
         string location, Schema schema, DeltaWriteOptions options, string output, CancellationToken ct)
     {
         var engine = await this.engine.Value.ConfigureAwait(false);
-        var storage = DeltaStorageOptions.Build(config).ToDictionary(kv => kv.Key, kv => kv.Value);
+        var storage = DeltaStorageOptions.Build(this.config).ToDictionary(kv => kv.Key, kv => kv.Value);
 
         try
         {

@@ -21,9 +21,18 @@ internal static class DeltaLakeSchemas
 
     /// <summary>Write options this connector understands. Deliberately excludes every name pz strips
     /// before a connector sees it — strategy, keys, duplicates, on_delete, schema_policy, retry —
-    /// and excludes the retired 'mode' spelling, which pz refuses outright.</summary>
+    /// and excludes the retired 'mode' spelling, which pz refuses outright.
+    ///
+    /// 'max_rows_per_group' is deliberately absent, having been measured to do nothing: writing
+    /// 100,000 rows through DeltaLake.Net 0.33.0 produces a single parquet row group of 100,000 rows
+    /// whether InsertOptions.MaxRowsPerGroup is left unset or set to 1000 (counted with DuckDB's
+    /// parquet_metadata). The value does reach Rust — 0 aborts the write with a panic, "assertion
+    /// failed: step != 0" — it simply has no effect on the output. Accepting it here would make it a
+    /// validated no-op that reads like a working setting, which is the exact failure this list exists
+    /// to prevent; leaving it out makes it an honest "unknown write option" error instead. It should
+    /// return the moment it demonstrably shapes a row group.</summary>
     public static readonly IReadOnlyList<string> WriteOptions =
-        ["path", "partition_by", "merge_predicate", "target_file_bytes", "max_rows_per_group"];
+        ["path", "partition_by", "merge_predicate", "target_file_bytes"];
 
     /// <summary>A calendar token as pz's path templating spells it: a brace-delimited run of date
     /// format characters. Delta partitions declaratively by column value, so a templated read path has
