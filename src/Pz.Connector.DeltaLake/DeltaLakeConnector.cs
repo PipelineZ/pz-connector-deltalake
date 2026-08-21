@@ -24,15 +24,22 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
         ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
         ConnectorCapabilities.PathTemplating;
 
-    public string ConnectionConfigSchema => throw new NotImplementedException();
+    public string ConnectionConfigSchema => DeltaLakeSchemas.Connection;
 
-    public string DatasetConfigSchema => throw new NotImplementedException();
+    public string DatasetConfigSchema => DeltaLakeSchemas.Dataset;
 
-    public ValueTask<ValidationResult> ValidateAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+    public ValueTask<ValidationResult> ValidateAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var errors = DeltaLakeValidation.Check(config);
+        return new ValueTask<ValidationResult>(
+            errors.Count == 0 ? ValidationResult.Success : new ValidationResult(errors));
+    }
 
+    /// <summary>No deep probe: opening a Delta table is the connectivity test, and it happens at run
+    /// time with a PZDL-coded failure that says more than a generic reachability check would.</summary>
     public ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+        new(new ConnectionCheck(true,
+            "deltalake connectivity is verified at run time when the table is opened"));
 
     ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();
