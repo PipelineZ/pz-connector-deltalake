@@ -196,7 +196,7 @@ internal static class DeltaErrors
             : WriteFailed;
 
         return Fail(fallbackCode, $"the delta {operation} failed ({raw})",
-            "check the table's protocol version and the incoming schema; see docs/troubleshooting.md", ex);
+            "check the table's protocol version and the incoming schema against the write", ex);
     }
 
     private static string Redact(string message)

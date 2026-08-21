@@ -208,6 +208,13 @@ public class DeltaMergeSqlTests
     [InlineData("target.dt = @x")]
     // An unterminated quoted region, and a lone '!' that is not an operator on its own.
     [InlineData("target.dt = 'a")]
+    // The '"' half of the same rule, in the shapes that tell an unterminated region apart from a
+    // terminated one however the region's end is computed: one whose remainder is not a column name,
+    // one whose remainder IS, and one whose remainder is a column name with a character trimmed off.
+    [InlineData("target.dt = \"a")]
+    [InlineData("target.dt = \"dt")]
+    [InlineData("target.dt = \"dtX")]
+    [InlineData("target.\"dt = 'x'")]
     [InlineData("target.dt ! 'a'")]
     public void A_predicate_outside_the_permitted_alphabet_is_refused(string predicate)
     {
@@ -311,7 +318,8 @@ public class DeltaMergeSqlTests
     }
 
     /// <summary>A schema whose column names exercise the shapes the word rules have to handle: one
-    /// needing quotes, one ending in '_', one ending in a digit, and one containing a '"'.</summary>
+    /// needing quotes, one ending in '_', one ending in a digit, one containing a '"', and one whose
+    /// name is not all lower case.</summary>
     private static Apache.Arrow.Schema AwkwardSchema() =>
         new Apache.Arrow.Schema.Builder()
             .Field(f => f.Name("id").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(false))
@@ -321,22 +329,59 @@ public class DeltaMergeSqlTests
             .Field(f => f.Name("a_").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Field(f => f.Name("a1").DataType(Apache.Arrow.Types.StringType.Default).Nullable(true))
             .Field(f => f.Name("q\"c").DataType(Apache.Arrow.Types.Int64Type.Default).Nullable(true))
+            .Field(f => f.Name("Amt").DataType(Apache.Arrow.Types.DoubleType.Default).Nullable(true))
             .Build();
 
     [Theory]
-    [InlineData("target.region = 'eu' AND target.dt > '2026-01-01'", true)]
-    [InlineData("\"weird col\" = 1", true)]
-    [InlineData("source.region = 'eu'", true)]
-    [InlineData("target.\"weird col\" >= 1", true)]
-    [InlineData("a_ = 'x'", true)]
-    [InlineData("a1 = 'x'", true)]
+    [InlineData("target.region = 'eu' AND target.dt > '2026-01-01'")]
+    [InlineData("\"weird col\" = 1")]
+    [InlineData("source.region = 'eu'")]
+    [InlineData("target.\"weird col\" >= 1")]
+    [InlineData("a_ = 'x'")]
+    [InlineData("a1 = 'x'")]
     // A '"' inside a quoted column name is written doubled, and has to be read back as one character
     // before the name can be matched against the schema.
-    [InlineData("\"q\"\"c\" = 1", true)]
-    public void A_predicate_over_this_outputs_own_columns_is_accepted(string predicate, bool awkward)
+    [InlineData("\"q\"\"c\" = 1")]
+    // A column whose name is not all lower case is reachable by writing its name, in its own case,
+    // either bare or quoted — which is what the merge path resolves.
+    [InlineData("Amt >= 0")]
+    [InlineData("\"Amt\" >= 0")]
+    [InlineData("target.Amt >= 0")]
+    [InlineData("target.\"Amt\" >= 0")]
+    [InlineData("\"target\".Amt >= 0")]
+    // Keywords are case-insensitive in this dialect; column names are not.
+    [InlineData("target.dt Like 'd%' And target.Amt Is Not Null")]
+    [InlineData("target.id In (1, 2) or TRUE")]
+    public void A_predicate_over_this_outputs_own_columns_is_accepted(string predicate) =>
+        Assert.Contains(
+            predicate, DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+
+    [Theory]
+    // Column names are matched ordinally because that is what the MERGE path does with them, measured
+    // against the shipped library: against a column 'dt' it refuses 'target.DT' with "Column names are
+    // case sensitive", and against a column 'Amt' it accepts 'target.Amt' and refuses 'target.AMT'.
+    // Folding case here would accept predicates the merge then refuses. (The same engine's ordinary
+    // SELECT planner behaves the OPPOSITE way — it lowercases an unquoted identifier first — which is
+    // why this rule is measured on the path that actually runs it rather than reasoned about.)
+    [InlineData("DT >= '2026-01-01'")]
+    [InlineData("\"DT\" >= '2026-01-01'")]
+    [InlineData("AMT >= 0")]
+    [InlineData("target.DT >= '2026-01-01'")]
+    [InlineData("target.\"DT\" >= '2026-01-01'")]
+    [InlineData("target.AMT >= 0")]
+    [InlineData("target.\"amt\" >= 0")]
+    // The two aliases delta-rs fixes for a merge are spelled in lower case, and it refuses any other
+    // spelling of them too.
+    [InlineData("TARGET.dt >= '2026-01-01'")]
+    [InlineData("\"TARGET\".dt >= '2026-01-01'")]
+    // A '"'-quoted token is an identifier, never a keyword, so a quoted keyword has to name a column.
+    [InlineData("\"AND\" = 1")]
+    [InlineData("target.dt = 'a' \"OR\" 1=1")]
+    public void A_predicate_whose_names_differ_from_the_schema_only_in_case_is_refused(string predicate)
     {
-        var schema = awkward ? AwkwardSchema() : DeltaTestTable.Schema;
-        Assert.Contains(predicate, DeltaMergeSql.Build(schema, Opts(["id"], mergePredicate: predicate), null));
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
     [Theory]
@@ -357,6 +402,9 @@ public class DeltaMergeSqlTests
     [InlineData("nosuchcolumn = 1")]
     [InlineData("other.dt = 'a'")]
     [InlineData("target.dt.x = 1")]
+    // The discriminating third part: 'dt' IS a column, so this is refused for being a three-part name
+    // rather than for naming something unknown.
+    [InlineData("target.dt.dt = 1")]
     // A trailing 'e' is only part of a number when digits follow it; otherwise it is a word, and an
     // unknown one.
     [InlineData("target.amt = 1e")]
@@ -388,14 +436,13 @@ public class DeltaMergeSqlTests
     [Theory]
     // The string-prefix rule looks at the character before the quote, and every identifier character
     // counts: a digit and an underscore as much as a letter.
-    [InlineData("target.dt = 1'a'", false)]
-    [InlineData("a_'x' = 'y'", true)]
-    [InlineData("a1'x' = 'y'", true)]
-    public void A_quote_directly_after_any_identifier_character_is_refused(string predicate, bool awkward)
+    [InlineData("target.dt = 1'a'")]
+    [InlineData("a_'x' = 'y'")]
+    [InlineData("a1'x' = 'y'")]
+    public void A_quote_directly_after_any_identifier_character_is_refused(string predicate)
     {
-        var schema = awkward ? AwkwardSchema() : DeltaTestTable.Schema;
         var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
-            () => DeltaMergeSql.Build(schema, Opts(["id"], mergePredicate: predicate), null));
+            () => DeltaMergeSql.Build(AwkwardSchema(), Opts(["id"], mergePredicate: predicate), null));
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 

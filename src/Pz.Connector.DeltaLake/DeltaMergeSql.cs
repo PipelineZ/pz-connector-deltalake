@@ -50,15 +50,23 @@ internal static class DeltaMergeSql
 
     private const string OperatorChars = "=<>!+-*/";
 
-    /// <summary>The complete word vocabulary. Every other bare word in a predicate has to be a column of
+    /// <summary>The complete word vocabulary. Every other word in a predicate has to name a column of
     /// the output's own schema, which is what keeps SELECT, FROM, EXISTS and every function name out
-    /// without this connector having to know their names. Compared case-insensitively because SQL
-    /// keywords are; column names are not, and are compared ordinally.</summary>
+    /// without this connector having to know their names — for every schema whose column names are not
+    /// themselves SQL words. An output column literally named "select" would re-admit "IN (select 1)",
+    /// and column names come from the pipeline's own SQL, so the author of a merge_predicate can mint
+    /// one. That is a limit of this check, not a hole in it: the same author already controls the
+    /// predicate, so nothing crosses a privilege boundary, and every OTHER schema is covered.
+    ///
+    /// Matched case-insensitively, and only against BARE words: a keyword is case-insensitive in this
+    /// dialect, but a '"'-quoted token is an identifier and is never a keyword.</summary>
     private static readonly string[] Keywords =
         ["AND", "OR", "NOT", "IS", "NULL", "IN", "BETWEEN", "LIKE", "TRUE", "FALSE"];
 
     /// <summary>The two table aliases delta-rs fixes for a merge. A qualified reference may only use
-    /// these; anything else names a table this statement does not have.</summary>
+    /// these; anything else names a table this statement does not have. Matched ordinally for the same
+    /// reason column names are — see <see cref="IsWellFormedPredicate"/>; "TARGET.dt" is refused here
+    /// and refused by delta-rs.</summary>
     private static readonly string[] Qualifiers = ["target", "source"];
 
     /// <summary>A partition literal that is a bare number: an optional sign, digits, an optional
@@ -179,15 +187,25 @@ internal static class DeltaMergeSql
     /// forms I know about" has to agree with that lexer byte for byte forever and silently opens a
     /// hole the first time the foreign lexer learns a new one. Refusing everything outside a fixed,
     /// small vocabulary fails the other way: an unknown construct is refused, not passed through. That
-    /// applies to WORDS exactly as it applies to characters, which is why an unrecognized bare word is
+    /// applies to WORDS exactly as it applies to characters, which is why an unrecognized word is
     /// refused rather than a list of dangerous ones being blocked: SELECT, FROM and EXISTS are only the
     /// three that happen to be known to abort delta-rs inside native code, where the merge call then
-    /// never returns and there is no error for anything to report.
+    /// never returns and there is no error for anything to report. The one thing this does not cover is
+    /// a schema whose own column names are SQL words — see the keyword table above.
     ///
     /// So a predicate may contain: a column of this output's schema, optionally qualified 'target.' or
     /// 'source.' and optionally '"'-quoted; a keyword from the list above; a '\''-quoted string literal
     /// (doubled-character escape only, which is the sole escape this SQL dialect applies to it); a
     /// number; whitespace; ','; balanced parentheses; and the operators listed above.
+    ///
+    /// Column names are matched ORDINALLY, quoted or not, because that is what the merge path does with
+    /// them — measured against the shipped library, not assumed. Inside a MERGE predicate delta-rs
+    /// resolves a bare identifier verbatim and answers a mismatch with "Column names are case
+    /// sensitive": against a column 'dt' it accepts 'target.dt' and refuses 'target.DT', and against a
+    /// column 'Amt' it accepts 'target.Amt' and refuses 'target.AMT'. Note this is NOT the behavior of
+    /// the same engine's ordinary SELECT planner, which lowercases an unquoted identifier first
+    /// ('select DT' resolves to column 'dt' there, and bare 'Amt' resolves to nothing at all). Folding
+    /// case here to follow that rule would accept predicates the merge then refuses.
     ///
     /// Balance is checked here rather than in a second pass because both checks need the same model of
     /// where quoted regions start and end. Two scanners carrying two copies of that model is the same
@@ -248,7 +266,7 @@ internal static class DeltaMergeSql
             }
             else if (c == '"' || char.IsAsciiLetter(c) || c == '_')
             {
-                if (!TryReadWord(predicate, ref i, out var word))
+                if (!TryReadWord(predicate, ref i, out var word, out var quoted))
                 {
                     return false;
                 }
@@ -261,14 +279,14 @@ internal static class DeltaMergeSql
                     // refusal at the end of this loop.
                     i++;
                     if (!Qualifiers.Contains(word, StringComparer.Ordinal)
-                        || !TryReadWord(predicate, ref i, out var column)
+                        || !TryReadWord(predicate, ref i, out var column, out _)
                         || !columns.Contains(column, StringComparer.Ordinal))
                     {
                         return false;
                     }
                 }
-                else if (!Keywords.Contains(word, StringComparer.OrdinalIgnoreCase)
-                         && !columns.Contains(word, StringComparer.Ordinal))
+                else if (!columns.Contains(word, StringComparer.Ordinal)
+                         && !(!quoted && Keywords.Contains(word, StringComparer.OrdinalIgnoreCase)))
                 {
                     return false;
                 }
@@ -300,12 +318,14 @@ internal static class DeltaMergeSql
     }
 
     /// <summary>Reads one word — a bare identifier or a '"'-quoted one — advancing
-    /// <paramref name="i"/> past it and yielding the name with the quoting removed. False if there is
-    /// no word there, if a quoted one never closes, or if a '"' sits directly after an identifier
-    /// character, which is the string-prefix shape refused above.</summary>
-    private static bool TryReadWord(string s, ref int i, out string word)
+    /// <paramref name="i"/> past it and yielding the name with the quoting removed, plus whether it was
+    /// quoted, which decides whether it may be a keyword. False if there is no word there, if a quoted
+    /// one never closes, or if a '"' sits directly after an identifier character, which is the
+    /// string-prefix shape refused above.</summary>
+    private static bool TryReadWord(string s, ref int i, out string word, out bool quoted)
     {
         word = string.Empty;
+        quoted = false;
 
         if (i >= s.Length)
         {
@@ -314,6 +334,7 @@ internal static class DeltaMergeSql
 
         if (s[i] == '"')
         {
+            quoted = true;
             if (i > 0 && IsIdentifierChar(s[i - 1]))
             {
                 return false;
