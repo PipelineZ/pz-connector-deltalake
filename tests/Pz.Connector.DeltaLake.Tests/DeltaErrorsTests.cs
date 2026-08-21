@@ -33,11 +33,41 @@ public class DeltaErrorsTests
         // integration test by construction, which is why it is pinned here instead.
         var raw = new DeltaLakeException(
             "Execution error: Non-nullable column 'note' is missing from the physical schema", 1);
-        var ex = DeltaErrors.Translate(raw, "merge of output 'orders'", ["id"]);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Merge, "merge of output 'orders'", ["id"]);
 
         Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
         Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(ex.IsTransient);
+    }
+
+    [Theory]
+    // The operation phrase embeds the OUTPUT'S OWN NAME, so it cannot be what decides read-vs-write.
+    // Each of these contains "read" as a substring while naming a perfectly ordinary output.
+    [InlineData("spreadsheet")]
+    [InlineData("threads")]
+    [InlineData("readings")]
+    public void Translate_classifies_a_write_by_its_kind_not_by_a_substring_of_the_output_name(string output)
+    {
+        var raw = new DeltaLakeException("some opaque delta-rs failure", 1);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, $"append of output '{output}'", []);
+
+        // PZDL0201 is the READ code. A write that lands on it sends the user to the wrong half of the
+        // reference for a failure that has nothing to do with reading.
+        Assert.Contains(DeltaErrors.WriteFailed, ex.Message);
+        Assert.DoesNotContain(DeltaErrors.TableUnreadable, ex.Message);
+    }
+
+    [Fact]
+    public void Translate_still_reaches_the_nullability_branch_for_an_output_whose_name_contains_read()
+    {
+        // The same substring would have skipped the NOT NULL mapping entirely, leaving the generic
+        // protocol-version next step on a failure whose remedy is a nullability change.
+        var raw = new DeltaLakeException(
+            "Execution error: Non-nullable column 'note' is missing from the physical schema", 1);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "merge of output 'spreadsheet'", []);
+
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -47,7 +77,7 @@ public class DeltaErrorsTests
         // way, and "would add a column" is not true of a read.
         var raw = new DeltaLakeException(
             "Execution error: Non-nullable column 'note' is missing from the physical schema", 1);
-        var ex = DeltaErrors.Translate(raw, "read of dataset 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Read, "read of dataset 'orders'", []);
 
         Assert.Contains(DeltaErrors.TableUnreadable, ex.Message);
     }
@@ -64,7 +94,7 @@ public class DeltaErrorsTests
     {
         var raw = new DeltaLakeException(
             "MERGE matched a target row with multiple source rows that satisfy duplicate relevant WHEN MATCHED clauses", 1);
-        var ex = DeltaErrors.Translate(raw, "merge", ["order_id", "region"]);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Merge, "merge", ["order_id", "region"]);
         Assert.Contains("PZDL0402", ex.Message);
         Assert.Contains("order_id, region", ex.Message);
         Assert.Contains("deduplicate", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -78,7 +108,7 @@ public class DeltaErrorsTests
     [InlineData("Metadata changed since last commit")]
     public void Translate_classifies_commit_races_as_transient(string message)
     {
-        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "commit", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "commit", []);
         Assert.True(ex.IsTransient);
         Assert.Contains("PZDL0401", ex.Message);
     }
@@ -88,7 +118,7 @@ public class DeltaErrorsTests
     {
         // Guessing "transient" for an unrecognized failure would make the engine retry a permanent
         // error N times before reporting it. Unknown means permanent.
-        var ex = DeltaErrors.Translate(new DeltaLakeException("schema mismatch: field 'x' not found", 1), "insert", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException("schema mismatch: field 'x' not found", 1), DeltaOperationKind.Write, "insert", []);
         Assert.False(ex.IsTransient);
     }
 
@@ -96,14 +126,14 @@ public class DeltaErrorsTests
     public void Translate_passes_a_PzConnectorException_through_untouched()
     {
         var original = DeltaErrors.Fail(DeltaErrors.SchemaMismatch, "already mapped", "do the thing");
-        Assert.Same(original, DeltaErrors.Translate(original, "insert", []));
+        Assert.Same(original, DeltaErrors.Translate(original, DeltaOperationKind.Write, "insert", []));
     }
 
     [Fact]
     public void Translate_never_leaks_a_storage_option_value()
     {
         var raw = new DeltaLakeException("failed with secret_access_key=AKIAWHOOPS in the message", 1);
-        var ex = DeltaErrors.Translate(raw, "insert", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain("AKIAWHOOPS", ex.Message);
     }
 
@@ -118,7 +148,7 @@ public class DeltaErrorsTests
     [InlineData("generic error: sas_key=SECRETSASVALUE222 rejected", "SECRETSASVALUE222")]
     public void Translate_never_leaks_an_env_var_style_storage_option(string message, string secret)
     {
-        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "insert", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain(secret, ex.Message);
     }
 
@@ -128,7 +158,7 @@ public class DeltaErrorsTests
     {
         var raw = new DeltaLakeException(
             "PUT https://myaccount:zGl3AbG9NDGgAAcVpSimplePass@blob.core.windows.net/container/file failed", 1);
-        var ex = DeltaErrors.Translate(raw, "insert", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain("zGl3AbG9NDGgAAcVpSimplePass", ex.Message);
         Assert.DoesNotContain("myaccount:zGl3", ex.Message);
     }
@@ -140,7 +170,7 @@ public class DeltaErrorsTests
     {
         var raw = new DeltaLakeException(
             "PUT https://myaccount:P@ssw0rdZZZ@blob.core.windows.net/container/file failed", 1);
-        var ex = DeltaErrors.Translate(raw, "insert", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain("ssw0rdZZZ", ex.Message);
     }
 
@@ -149,7 +179,7 @@ public class DeltaErrorsTests
     {
         var raw = new DeltaLakeException(
             "request failed: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", 1);
-        var ex = DeltaErrors.Translate(raw, "insert", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain("eyJhbGciOiJIUzI1NiJ9.payload.sig", ex.Message);
     }
 
@@ -158,7 +188,7 @@ public class DeltaErrorsTests
     {
         var raw = new DeltaLakeException(
             "sas token rejected: https://a.blob.core.windows.net/c/b?sv=2021&sig=AbCdEf123%3D&se=2026-01-01", 1);
-        var ex = DeltaErrors.Translate(raw, "insert", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "insert", []);
         Assert.DoesNotContain("AbCdEf123", ex.Message);
     }
 
@@ -174,7 +204,7 @@ public class DeltaErrorsTests
     [InlineData("A Delta Lake table already exists at that location.")]
     public void Translate_classifies_a_table_already_exists_create_failure_as_permanent(string message)
     {
-        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "create", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "create", []);
         Assert.False(ex.IsTransient);
     }
 
@@ -194,7 +224,7 @@ public class DeltaErrorsTests
     [InlineData("DynamoDb error: Provisioned table throughput exceeded")]
     public void Translate_classifies_a_storage_layer_transient_failure_as_transient(string message)
     {
-        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), "commit", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "commit", []);
         Assert.True(ex.IsTransient);
     }
 
@@ -203,7 +233,7 @@ public class DeltaErrorsTests
     [Fact]
     public void Translate_classifies_an_unrecognized_read_failure_as_table_unreadable()
     {
-        var ex = DeltaErrors.Translate(new DeltaLakeException("some opaque delta-rs read error", 1), "read", []);
+        var ex = DeltaErrors.Translate(new DeltaLakeException("some opaque delta-rs read error", 1), DeltaOperationKind.Read, "read", []);
         Assert.Contains(DeltaErrors.TableUnreadable, ex.Message);
         Assert.False(ex.IsTransient);
     }
@@ -215,7 +245,7 @@ public class DeltaErrorsTests
     public void Translate_rethrows_cancellation_instead_of_wrapping_it()
     {
         var cancelled = new OperationCanceledException("the operation was canceled");
-        var thrown = Assert.Throws<OperationCanceledException>(() => DeltaErrors.Translate(cancelled, "insert", []));
+        var thrown = Assert.Throws<OperationCanceledException>(() => DeltaErrors.Translate(cancelled, DeltaOperationKind.Write, "insert", []));
         Assert.Same(cancelled, thrown);
     }
 
@@ -236,7 +266,7 @@ public class DeltaErrorsTests
             "| 778 |    | 42424.25 |\n" +
             "+-----+----+----------+", 1);
 
-        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
 
         Assert.DoesNotContain("777", ex.Message);
         Assert.DoesNotContain("778", ex.Message);
@@ -255,7 +285,7 @@ public class DeltaErrorsTests
         // than a table of rows.
         var raw = new DeltaLakeException(
             "Generic DeltaTable error: Invalid data found: validation check failed with value 31337.5", 1);
-        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
 
         Assert.DoesNotContain("31337.5", ex.Message);
         Assert.Contains("validation check failed with value <redacted>", ex.Message);
@@ -272,7 +302,7 @@ public class DeltaErrorsTests
             "Generic DeltaTable error: External error: Invalid data found: 1 rows failed validation check.\n" +
             "Preview of invalid data: id=777 amt=31337.5", 1);
 
-        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
 
         Assert.DoesNotContain("777", ex.Message);
         Assert.DoesNotContain("31337.5", ex.Message);
@@ -292,7 +322,7 @@ public class DeltaErrorsTests
             "| 777 | 31337.5  |\n" +
             "+-----+----------+", 1);
 
-        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
 
         Assert.DoesNotContain("777", ex.Message);
         Assert.DoesNotContain("31337.5", ex.Message);
@@ -308,7 +338,7 @@ public class DeltaErrorsTests
             "Generic DeltaTable error: AWS_SECRET_ACCESS_KEY=hunter2 rejected: Invalid data found: " +
             "1 rows failed validation check.\nPreview of invalid data:\n| id |\n| 777 |", 1);
 
-        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+        var ex = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
 
         Assert.DoesNotContain("hunter2", ex.Message);
         Assert.DoesNotContain("777", ex.Message);

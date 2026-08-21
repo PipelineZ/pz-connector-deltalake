@@ -143,7 +143,7 @@ internal sealed class DeltaWriteSession(
         }
         catch (Exception ex)
         {
-            throw DeltaErrors.Translate(ex, $"{options.Mode} of output '{output}'", options.Keys);
+            throw DeltaErrors.Translate(ex, DeltaOperationKind.Write, $"{options.Mode} of output '{output}'", options.Keys);
         }
         finally
         {
@@ -170,7 +170,7 @@ internal sealed class DeltaWriteSession(
         }
         catch (Exception ex)
         {
-            throw DeltaErrors.Translate(ex, $"{options.Mode} of output '{output}'", options.Keys);
+            throw DeltaErrors.Translate(ex, DeltaOperationKind.Write, $"{options.Mode} of output '{output}'", options.Keys);
         }
     }
 
@@ -217,15 +217,22 @@ internal sealed class DeltaWriteSession(
         }
 
         this.RefuseUnmatchableKeys();
-        var targets = await this.WidenAsync(ct).ConfigureAwait(false);
 
         // Safe to hand the buffer straight to the deriver: these are the session's own CLONES, not the
         // engine-owned batches WriteBatchAsync was called with.
         var derivation = DeltaPartitionPredicate.Derive(this.buffered, options);
         this.LastSkipReason = derivation.SkipReason;
 
-        var sql = DeltaMergeSql.Build(schema, targets, options, derivation.Filters);
+        // BUILD BEFORE WIDENING, and the order is load-bearing: every refusal Build can raise —
+        // a malformed merge_predicate, an unquotable column name, an unusable partition filter — is a
+        // CONFIGURATION error, and a configuration error must not leave the table permanently one
+        // column wider with a commit in its log. Widening first meant a run that never wrote a row
+        // still changed the table, and the next run under the default schema_policy was then refused
+        // for a column the failed run had added.
+        var sql = DeltaMergeSql.Build(schema, this.WidenedColumns(), options, derivation.Filters);
         this.LastMergeSql = sql;
+
+        await this.WidenAsync(ct).ConfigureAwait(false);
 
         var payload = this.buffered.ToArray();
         try
@@ -234,12 +241,33 @@ internal sealed class DeltaWriteSession(
         }
         catch (Exception ex)
         {
-            throw DeltaErrors.Translate(ex, $"merge of output '{output}'", options.Keys, options.MergePredicate);
+            throw DeltaErrors.Translate(ex, DeltaOperationKind.Merge, $"merge of output '{output}'", options.Keys,
+                options.MergePredicate);
         }
     }
 
-    /// <summary>Widens the table to carry the columns this write adds, and answers the column list the
-    /// merge statement must resolve `target.` names against.
+    /// <summary>The column list the merge statement resolves `target.` names against: the table's own
+    /// columns plus the ones <see cref="WidenAsync"/> is about to add. It has to be computed rather than
+    /// read back, because the statement is built BEFORE the widening commits — see the ordering note in
+    /// MergeAsync — and a `target.` name for a column this write adds must still resolve.
+    ///
+    /// Union, not replacement: the table's own columns stay, so a predicate may narrow on a column only
+    /// the table has. The list is a superset of nothing and a subset of what the table will hold — a
+    /// concurrent writer adding a column of its own between the snapshot and here would leave that
+    /// column unnameable, which over-refuses a predicate rather than admitting one, the safe
+    /// direction.</summary>
+    private IReadOnlyList<string> WidenedColumns()
+    {
+        var columns = targetColumns.ToList();
+        var known = targetColumns.ToHashSet(StringComparer.Ordinal);
+
+        // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive, so a table column
+        // 'DT' does not cover an incoming 'dt' and both have to be nameable.
+        columns.AddRange(schema.FieldsList.Select(f => f.Name).Where(n => known.Add(n)));
+        return columns;
+    }
+
+    /// <summary>Widens the table to carry the columns this write adds.
     ///
     /// A merge statement names the SOURCE's columns in its SET and INSERT clauses. Measured against the
     /// shipped library: delta-rs ACCEPTS a statement naming a column the table does not have, commits
@@ -262,16 +290,22 @@ internal sealed class DeltaWriteSession(
     /// on an EMPTY table it succeeds — so it is not refused pre-flight, which would cost the empty case;
     /// the failure is mapped to a coded error instead (DeltaErrors' MissingPhysicalColumnMarker).
     ///
-    /// The widening commits before the merge does, so a merge that then fails leaves the table widened.
+    /// The widening commits before the merge does, so a merge that then FAILS leaves the table widened.
     /// That is the same shape as an append's already-flushed generation, which is why this sink declares
     /// AbortSemantics.BestEffort, and it costs nothing: the added column is nullable and every existing
-    /// row reads null in it.</summary>
-    private async Task<IReadOnlyList<string>> WidenAsync(CancellationToken ct)
+    /// row reads null in it. A merge that is REFUSED is a different matter and is not in that category —
+    /// the statement is validated before this runs, so a configuration error never reaches here.
+    ///
+    /// Two writers widening at once is safe and needs no handling: measured, the loser gets delta-rs's
+    /// "Metadata changed since last commit", which DeltaErrors classifies as a transient PZDL0401, and
+    /// the retry's WidenAsync sees the winner's column and either early-returns or adds only its
+    /// own.</summary>
+    private async Task WidenAsync(CancellationToken ct)
     {
         var known = targetColumns.ToHashSet(StringComparer.Ordinal);
         if (schema.FieldsList.All(f => known.Contains(f.Name)))
         {
-            return targetColumns;
+            return;
         }
 
         // Slicing a buffered batch to zero rows is how the wider schema is expressed without inventing
@@ -285,13 +319,10 @@ internal sealed class DeltaWriteSession(
         {
             await DeltaBigStack.RunAsync(() => table.InsertAsync([empty], schema, insert, ct))
                 .ConfigureAwait(false);
-            return await DeltaBigStack.RunAsync(
-                () => Task.FromResult<IReadOnlyList<string>>(
-                    [.. table.Schema().FieldsList.Select(f => f.Name)])).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            throw DeltaErrors.Translate(ex, $"schema widening of output '{output}'", options.Keys);
+            throw DeltaErrors.Translate(ex, DeltaOperationKind.Write, $"schema widening of output '{output}'", options.Keys);
         }
     }
 

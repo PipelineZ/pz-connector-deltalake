@@ -550,6 +550,57 @@ public class MergeErrorTests
     }
 
     [Fact]
+    public async Task A_merge_predicate_may_name_a_column_this_write_is_about_to_add()
+    {
+        // The identifier seam after widening. `targetColumns` is snapshotted at BeginWriteAsync, before
+        // the table has the column, so a `target.`-qualified name for a column this write ADDS resolves
+        // only because the statement is built against the table's columns UNIONED with the write's.
+        // With a stale list this is refused PZDL0107 before anything is written, so the seam cannot
+        // regress silently — which it could until this test existed.
+        var dir = TempDir("pz-delta-widenseam");
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        var spec = Merge(["id"], ("merge_predicate", "target.archived IS NULL")) with
+        { SchemaPolicy = "evolve" };
+        await using (var s = await sink.BeginWriteAsync(spec, WithArchived, default))
+        {
+            await s.WriteBatchAsync(ArchivedRows([(1L, "2026-01-01", 9.0, "kept")]), default);
+            await s.CommitAsync(default);
+        }
+
+        var location = Path.Combine(dir, "orders");
+        Assert.Contains("archived", await DeltaReader.ColumnsAsync(location));
+        Assert.Contains(await ArchivedReadAsync(location), r => r.Id == 1 && r.Archived == "kept");
+    }
+
+    [Fact]
+    public async Task A_refused_merge_predicate_leaves_the_table_exactly_as_it_found_it()
+    {
+        // A configuration error must not mutate shared state. Widening before the statement was
+        // validated meant a run that never wrote a row still added a column and a commit to the table's
+        // log — and the NEXT run of the same pipeline, under the default schema_policy, was then
+        // refused for a column the failed run had left behind.
+        var dir = TempDir("pz-delta-refusenowiden");
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        var location = Path.Combine(dir, "orders");
+        var commitsBefore = DeltaReader.CommitCount(location);
+
+        var spec = Merge(["id"], ("merge_predicate", "target.dt = 'a;b'")) with { SchemaPolicy = "evolve" };
+        await using (var s = await sink.BeginWriteAsync(spec, WithArchived, default))
+        {
+            await s.WriteBatchAsync(ArchivedRows([(1L, "2026-01-01", 9.0, "kept")]), default);
+            var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
+            Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        }
+
+        Assert.DoesNotContain("archived", await DeltaReader.ColumnsAsync(location));
+        Assert.Equal(commitsBefore, DeltaReader.CommitCount(location));
+    }
+
+    [Fact]
     public async Task Merge_without_evolve_still_refuses_a_column_the_table_lacks()
     {
         // The discriminating control: widening happens only because the user asked for it. Under the
@@ -573,9 +624,9 @@ public class MergeErrorTests
 
     [Theory]
     [InlineData("append")]
-    [InlineData("replace")]
     [InlineData("merge")]
-    public async Task Adding_a_not_null_column_under_evolve_is_refused_on_every_strategy(string strategy)
+    public async Task Adding_a_not_null_column_under_evolve_is_refused_where_older_rows_survive(
+        string strategy)
     {
         // The worst failure shape this connector has produced, and the reason the rule is pre-flight
         // rather than mapped from a write failure. Measured against the shipped library: on 'append',
@@ -592,6 +643,8 @@ public class MergeErrorTests
         var ex = await Assert.ThrowsAsync<PzConnectorException>(
             async () => await sink.BeginWriteAsync(spec, WithRequiredNote, default));
 
+        Assert.Contains(strategy, ex.Message);
+
         Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
         Assert.Contains("'note'", ex.Message);
         Assert.Contains("NOT NULL", ex.Message);
@@ -603,6 +656,67 @@ public class MergeErrorTests
         Assert.Contains("new table", ex.Message);
         Assert.Contains("no rows right now", ex.Message);
         Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task Replace_may_add_a_not_null_column_because_no_older_row_survives_it()
+    {
+        // The control that keeps the rule honest, and it replaces an [InlineData("replace")] that had
+        // pinned a false refusal. 'replace' is one SaveMode.Overwrite commit and that overwrite is
+        // TOTAL, not per-partition — measured: on a table partitioned by 'dt' with rows in two
+        // partitions, a replace writing only the first leaves the second's row GONE. So no row survives
+        // that predates the added column, the reason the rule gives ("rows this write leaves in place")
+        // does not apply, and the write commits and reads back with the value present.
+        //
+        // The table here is PARTITIONED and the write touches one partition on purpose: that is the
+        // shape in which a per-partition overwrite would have left an older row behind and made this
+        // the same defect append has.
+        var dir = TempDir("pz-delta-replace-notnull");
+        await using var sink = await OpenSink(dir);
+        var partitioned = new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } };
+
+        await using (var seed = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "append", "fail_on_change", partitioned),
+            DeltaTestTable.Schema, default))
+        {
+            await seed.WriteBatchAsync(
+                DeltaTestTable.RowsWithAmounts([(1L, "pA", 1.0), (2L, "pB", 2.0)]), default);
+            await seed.CommitAsync(default);
+        }
+
+        await using (var s = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "replace", "evolve", partitioned), WithRequiredNote, default))
+        {
+            await s.WriteBatchAsync(RequiredNoteRows(), default);
+            Assert.Equal(1, (await s.CommitAsync(default)).RowsWritten);
+        }
+
+        // Read the added column back with a real projection. A count(*) never touches the physical
+        // schema, which is exactly why an unreadable table can look fine to one.
+        var rows = await NoteReadAsync(Path.Combine(dir, "orders"));
+        Assert.Equal(("n", 1L), (Assert.Single(rows).Note, Assert.Single(rows).Id));
+    }
+
+    [Fact]
+    public async Task Replace_with_no_rows_leaves_the_schema_alone()
+    {
+        // The other edge of the exemption: a replace that writes nothing takes the DeleteAsync path,
+        // which empties the table and changes no schema at all — measured. So exempting 'replace' does
+        // not depend on a widening that never happens.
+        var dir = TempDir("pz-delta-replace-empty");
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        await using (var s = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "replace", "evolve", new Dictionary<string, object?>()),
+            WithRequiredNote, default))
+        {
+            Assert.Equal(0, (await s.CommitAsync(default)).RowsWritten);
+        }
+
+        var location = Path.Combine(dir, "orders");
+        Assert.DoesNotContain("note", await DeltaReader.ColumnsAsync(location));
+        Assert.Equal(0, await DeltaReader.RowCountAsync(location));
     }
 
     [Theory]
@@ -775,6 +889,50 @@ public class MergeErrorTests
         .Field(f => f.Name("note").DataType(StringType.Default).Nullable(false))
         .Build();
 
+    private static RecordBatch RequiredNoteRows() =>
+        new(WithRequiredNote,
+            [
+                new Int64Array.Builder().Append(1L).Build(),
+                new StringArray.Builder().Append("pA").Build(),
+                new DoubleArray.Builder().Append(9.0).Build(),
+                new StringArray.Builder().Append("n").Build(),
+            ],
+            1);
+
+    /// <summary>Projects the NOT NULL column a replace added. A row count would pass over a table whose
+    /// physical schema cannot satisfy it, because count(*) never reads a column.</summary>
+    private static Task<IReadOnlyList<(long Id, string Note)>> NoteReadAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                var rows = new List<(long, string)>();
+                var query = new SelectQuery("select id, note from tbl order by id") { TableAlias = "tbl" };
+                await foreach (var batch in table.QueryAsync(query, default))
+                {
+                    using (batch)
+                    {
+                        var id = (Int64Array)batch.Column(0);
+                        for (var i = 0; i < batch.Length; i++)
+                        {
+                            rows.Add((id.GetValue(i) ?? 0, DeltaReader.Text(batch.Column(1), i)));
+                        }
+                    }
+                }
+
+                return (IReadOnlyList<(long, string)>)rows;
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
     /// <summary>Two NOT NULL additions at once, so an aggregate refusal has more than one to name.</summary>
     private static readonly Schema WithTwoRequired = new Schema.Builder()
         .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
@@ -783,16 +941,6 @@ public class MergeErrorTests
         .Field(f => f.Name("note").DataType(StringType.Default).Nullable(false))
         .Field(f => f.Name("region").DataType(StringType.Default).Nullable(false))
         .Build();
-
-    private static RecordBatch RequiredNoteRows() =>
-        new(WithRequiredNote,
-            [
-                new Int64Array.Builder().Append(1L).Build(),
-                new StringArray.Builder().Append("2026-01-01").Build(),
-                new DoubleArray.Builder().Append(9.0).Build(),
-                new StringArray.Builder().Append("n").Build(),
-            ],
-            1);
 
     /// <summary>A double-keyed table, so a key can carry NaN.</summary>
     private static readonly Schema RateKeyed = new Schema.Builder()

@@ -28,9 +28,8 @@ connector accepts but the SQL engine cannot parse is reported as `PZDL0107`.
 
 ### `merge_predicate` turns an excluded row into a DUPLICATE, not a skip
 
-**Read this before using `merge_predicate`.** It is the sharpest edge on the merge surface, it is
-inherent to Delta's `MERGE` and not something this connector can refuse, and it is easy to read
-"narrows the merge" as "touches fewer rows".
+**Read this before using `merge_predicate`.** It is the sharpest edge on the merge surface, and it is
+easy to read "narrows the merge" as "touches fewer rows".
 
 The predicate is ANDed into the `ON` clause. A row it excludes is therefore **not matched** — and an
 unmatched source row is an `INSERT`. The target row it should have updated stays exactly where it is,
@@ -66,6 +65,18 @@ select * from staged where dt >= '2026-01-01'
 Use `merge_predicate` on top of that only to prune the target scan for speed — never as the only place
 the condition appears. A condition that holds for the source and the target alike (`target.dt` matching
 a filter the pipeline already applied) prunes without excluding anything, which is the safe shape.
+
+**Why this connector does not turn the exclusion into a skip.** Delta's `MERGE` can guard the insert
+branch as well (`WHEN NOT MATCHED AND (…)`), and delta-rs accepts one. Measured, for a predicate
+written only over `source.` columns, that does give a true skip: the excluded row is neither updated
+nor duplicated, and a genuinely new key is still inserted. But applying the same treatment to a
+`target.`-qualified predicate — the form the example above uses, and the form anyone writing a
+target-scan prune reaches for — is **worse than the duplicate**: a brand-new key has no target row, so
+every `target.` reference in the guard is NULL, the guard is not true, and the row is **silently
+dropped**. Measured: the same three-row source that duplicates one key under the plain form loses its
+new key entirely under the guarded one. Losing a row without a word is a worse outcome than gaining
+one that shows up in the table, so the connector emits the plain form for every predicate and this
+page tells you the consequence instead.
 
 ### Values a merge key cannot carry
 

@@ -5,6 +5,17 @@ using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.DeltaLake;
 
+/// <summary>Which kind of operation a failure came from. Passed to <see cref="DeltaErrors.Translate"/>
+/// explicitly rather than sniffed out of the human-readable operation text, because that text embeds
+/// the user's own output name: an output called "spreadsheet", "threads" or "readings" contains "read",
+/// and a write against it would otherwise be classified — and coded — as a read failure.</summary>
+internal enum DeltaOperationKind
+{
+    Read,
+    Write,
+    Merge,
+}
+
 /// <summary>The connector's error registry and the one place a delta-rs failure becomes a pz error.
 /// Codes carry a PZDL prefix rather than PZ: pz owns the PZ registry and wraps connector failures in
 /// its own node-failure code, so a connector minting PZ codes would collide with it. Every code here
@@ -207,11 +218,14 @@ internal static class DeltaErrors
     public static PzConnectorException Transient(string code, string what, string nextStep, Exception? inner = null) =>
         new($"{code}: {what}. Next step: {nextStep}", isTransient: true, retryAfter: null, innerException: inner);
 
-    /// <summary><paramref name="mergePredicate"/> is the output's merge_predicate when one is
-    /// configured. It changes no classification; it decides only whether a parse failure can honestly
-    /// point the user at their own predicate or has to be reported as a connector bug.</summary>
+    /// <summary><paramref name="kind"/> decides classification; <paramref name="operation"/> is only
+    /// the phrase the message reads back to the user and is never inspected.
+    /// <paramref name="mergePredicate"/> is the output's merge_predicate when one is configured — it
+    /// changes no classification either, and decides only whether a parse failure can honestly point the
+    /// user at their own predicate or has to be reported as a connector bug.</summary>
     public static PzConnectorException Translate(
-        Exception ex, string operation, IReadOnlyList<string> mergeKeys, string? mergePredicate = null)
+        Exception ex, DeltaOperationKind kind, string operation, IReadOnlyList<string> mergeKeys,
+        string? mergePredicate = null)
     {
         if (ex is PzConnectorException already)
         {
@@ -241,7 +255,7 @@ internal static class DeltaErrors
         // Write operations only: the same message reaches a READ of a table some earlier write already
         // widened this way, and "would add a column" is not true of a read.
         if (raw.Contains(MissingPhysicalColumnMarker, StringComparison.OrdinalIgnoreCase)
-            && !operation.Contains("read", StringComparison.OrdinalIgnoreCase))
+            && kind is not DeltaOperationKind.Read)
         {
             return Fail(SchemaMismatch,
                 $"the delta {operation} would add a column the table declares NOT NULL, and the rows " +
@@ -252,7 +266,7 @@ internal static class DeltaErrors
         }
 
         if (raw.Contains(ParserErrorMarker, StringComparison.OrdinalIgnoreCase)
-            && operation.Contains("merge", StringComparison.OrdinalIgnoreCase))
+            && kind is DeltaOperationKind.Merge)
         {
             // The generic next step below names the protocol version and the schema, neither of which
             // has anything to do with a statement that did not parse.
@@ -306,9 +320,7 @@ internal static class DeltaErrors
 
         // TableUnreadable (PZDL0201) exists specifically for the read path; an unrecognized write
         // failure has nowhere else to land but WriteFailed (PZDL0404).
-        var fallbackCode = operation.Contains("read", StringComparison.OrdinalIgnoreCase)
-            ? TableUnreadable
-            : WriteFailed;
+        var fallbackCode = kind is DeltaOperationKind.Read ? TableUnreadable : WriteFailed;
 
         return Fail(fallbackCode, $"the delta {operation} failed ({raw})",
             "check the table's protocol version and the incoming schema against the write", ex);

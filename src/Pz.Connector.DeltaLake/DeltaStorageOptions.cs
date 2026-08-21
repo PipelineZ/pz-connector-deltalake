@@ -129,7 +129,7 @@ internal static class DeltaStorageOptions
             // else, so a run that was stopped on purpose is never reported as a doomed one. Every other
             // failure lands on TableUnreadable (PZDL0201) here because "read" is in the operation name
             // — that branch exists specifically so read paths get a read code instead of WriteFailed.
-            throw DeltaErrors.Translate(ex, $"read of dataset '{dataset}'", []);
+            throw DeltaErrors.Translate(ex, DeltaOperationKind.Read, $"read of dataset '{dataset}'", []);
         }
     }
 
