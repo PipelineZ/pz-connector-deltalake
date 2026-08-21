@@ -301,7 +301,13 @@ internal sealed class DeltaLakeSink : ISink
             // merge_predicate has to resolve against, and under schema_policy: evolve the table
             // legitimately carries nullable columns this write does not produce.
             var targetColumns = existing.Item1.FieldsList.Select(f => f.Name).ToList();
-            return new DeltaWriteSession(table, schema, targetColumns, options, spec.Output);
+
+            // The table's partition columns, not options.PartitionBy: a run against a table an earlier
+            // run partitioned need not declare partition_by at all, so the option is not what decides
+            // which columns become directory names. Reconcile above has already refused a declared value
+            // that disagrees with this one.
+            return new DeltaWriteSession(
+                table, schema, targetColumns, existing.Item2 ?? [], options, spec.Output);
         }
         catch (Exception ex)
         {

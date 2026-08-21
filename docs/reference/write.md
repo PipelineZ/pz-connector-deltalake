@@ -38,14 +38,32 @@ A merge is refused, with `PZDL0405`, when a key column holds a value the join ca
 Both are refused rather than allowed to happen, because a duplicated row and a successful merge look
 identical from the outside.
 
+**Documented limit.** The null-key check reads the batches this write hands over; it does not read the
+target table. A null key already sitting in the table that no incoming row touches is outside its
+reach. Reading the whole target on every merge would cost more than the operation the check protects,
+so it is not done.
+
 ### Values a partition column cannot carry
 
-Independent of strategy, `PZDL0406` reports a partition value the storage layer will not take:
+Independent of strategy — `append`, `replace` and `merge` alike — `PZDL0406` reports a partition value
+this connector will not write:
 
-- an empty or null value in a partition column the table declares `NOT NULL`;
-- a value whose directory name exceeds the filesystem's path-component limit (255 bytes on the common
-  local filesystems; object storage has no such limit). The value is percent-escaped on the way in, so
-  a shorter string can still exceed it.
+- **An empty value in any partition column.** Refused before the batch is buffered. Delta writes a
+  partition value into a directory name, and an empty value produces `col=`, which it cannot tell from
+  a null. On a *nullable* partition column delta-rs therefore accepts the write and the rows read back
+  with **null** in that column — a silent change to your data, with no error anywhere; on a `NOT NULL`
+  one it fails the insert, but only after the table exists and after any generation an append already
+  flushed has committed. Both string and binary columns are affected, and both are refused. A genuine
+  null is *not* refused: a null written is a null read back.
+- **A value whose directory name exceeds the filesystem's path-component limit** (255 bytes on the
+  common local filesystems; object storage has no such limit). The value is percent-escaped on the way
+  in, so a shorter string can still exceed it.
+
+Every offending column is named in one message; the messages name columns and never values.
+
+The guard's authority is the table's own partition columns, not `partition_by`. `partition_by` is
+honoured only when the table is created, so a run against a table an earlier run partitioned need not
+declare it.
 
 ## What a merge costs
 

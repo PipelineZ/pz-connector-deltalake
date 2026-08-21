@@ -55,9 +55,15 @@ internal static class DeltaErrors
     /// is why it lives with the runtime codes rather than beside PZDL0103's empty-keys check.</summary>
     public const string UnmatchableMergeKey = "PZDL0405";
 
-    /// <summary>A partition value the storage layer refused. A partition value is not ordinary data: it
+    /// <summary>A partition value this write cannot store. A partition value is not ordinary data: it
     /// becomes a directory name, so it inherits that layer's limits — a path-component length cap, and
-    /// Delta's own inability to tell an empty partition value from a null one.</summary>
+    /// Delta's own inability to tell an empty partition value from a null one.
+    ///
+    /// Raised from two places, deliberately. An EMPTY value is refused pre-flight, per batch, by
+    /// DeltaWriteSession: on a nullable partition column delta-rs accepts it and silently stores a null,
+    /// so there is no failure to translate and no other point at which it can be caught. Everything
+    /// else — an empty or null value in a NOT NULL partition column, a name too long for the
+    /// filesystem — is a real delta-rs failure and is translated below.</summary>
     public const string UnusablePartitionValue = "PZDL0406";
 
     // Protocol.
@@ -106,11 +112,17 @@ internal static class DeltaErrors
 
     private const string DuplicateMergeMarker = "multiple source rows";
 
-    /// <summary>delta-rs's wording when a partition column the table declares NOT NULL receives a null —
-    /// or an empty string, which Delta's partition encoding cannot tell apart from one. Measured against
-    /// the shipped library: an empty value in a non-nullable partition column produces exactly this,
-    /// while the same value in an ordinary non-nullable column produces a different message that names
-    /// the column plainly, and a struct column holding nulls produces none at all.</summary>
+    /// <summary>delta-rs's wording when a partition column the table declares NOT NULL receives a value
+    /// its directory encoding stores as a null. Measured against the shipped library: an empty value in
+    /// a non-nullable partition column produces exactly this, while the same value in an ordinary
+    /// non-nullable column produces a different message that names the column plainly, and a struct
+    /// column holding nulls produces none at all.
+    ///
+    /// Still reachable after DeltaWriteSession's pre-flight refusal, which is why it stays: that guard
+    /// walks the column encodings a value can be empty in, and an empty BINARY partition value produces
+    /// this same message — measured. A genuine null in a NOT NULL partition column does NOT: delta-rs
+    /// answers that one with "Column 'x' is declared as non-nullable but contains null values", which
+    /// names the column and the cause plainly and needs no mapping of its own.</summary>
     private const string PartitionNullMarker = "found unmasked nulls for non-nullable";
 
     /// <summary>The filesystem refusing a path component. A partition value becomes a directory name, so

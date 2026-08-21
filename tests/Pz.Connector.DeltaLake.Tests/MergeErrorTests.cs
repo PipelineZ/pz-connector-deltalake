@@ -252,43 +252,150 @@ public class MergeErrorTests
         Assert.False(ex.IsTransient);
     }
 
-    [Fact]
-    public async Task An_empty_partition_key_value_is_refused_rather_than_silently_duplicating_a_row()
+    [Theory]
+    [InlineData("append")]
+    [InlineData("replace")]
+    public async Task An_empty_partition_value_is_refused_on_every_strategy(string strategy)
     {
-        // Delta writes a partition value into a directory name, where an empty string and a null are
-        // the same thing. Measured: a row written with '' reads back with null in that column, so the
-        // next merge on that key inserts a second copy — with and without a derived partition
-        // predicate alike, which is what makes it a property of the encoding rather than of pruning.
-        var dir = TempDir("pz-delta-emptykey");
+        // The silent one, and the reason this guard is not merge-only. Measured against real delta-rs:
+        // a NULLABLE partition column holding an empty value writes SUCCESSFULLY, lands in a directory
+        // named 'dt=', and reads back as NULL — the user's value changed, on the plainest append there
+        // is, with no error anywhere. Refused per batch, before anything is buffered, because an append
+        // flushes bounded generations and a flushed generation is a commit that cannot be unwound.
+        var dir = TempDir("pz-delta-emptypart-" + strategy);
         await using var sink = await OpenSink(dir);
-        var spec = Merge(["id", "dt"], ("partition_by", new List<object?> { "dt" }));
+        var spec = new OutputSpec("lake", "orders", strategy, "fail_on_change",
+            new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } });
 
         await using var s = await sink.BeginWriteAsync(spec, NullableDt, default);
-        await s.WriteBatchAsync(NullableDtRows([(1L, string.Empty, 5.0)]), default);
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
-        Assert.Contains(DeltaErrors.UnmatchableMergeKey, ex.Message);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(NullableDtRows([(1L, string.Empty, 1.0)]), default));
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
+        Assert.Contains("'dt'", ex.Message);
+        Assert.Contains("null", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ex.IsTransient);
+
+        // Refused before the value could reach storage: nothing was written.
+        Assert.Equal(0, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
+    }
+
+    [Fact]
+    public async Task An_empty_partition_value_is_refused_on_a_merge_whose_partition_column_is_not_a_key()
+    {
+        // The gap the merge-key guard cannot see: 'dt' is a partition column but NOT a key, so
+        // PZDL0405 never looks at it. Without this refusal the write succeeds and the row's dt becomes
+        // null.
+        var dir = TempDir("pz-delta-emptypart-merge");
+        await using var sink = await OpenSink(dir);
+        var spec = Merge(["id"], ("partition_by", new List<object?> { "dt" }));
+
+        await using var s = await sink.BeginWriteAsync(spec, NullableDt, default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(NullableDtRows([(1L, string.Empty, 5.0)]), default));
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
         Assert.Contains("'dt'", ex.Message);
     }
 
     [Fact]
-    public async Task An_empty_string_in_a_non_null_partition_column_is_reported_with_a_code()
+    public async Task An_empty_partition_value_is_refused_on_a_table_the_write_does_not_declare_partitions_for()
     {
-        // Not a merge case: any strategy hits it, because it is delta-rs refusing to encode the value.
-        // Untranslated it arrives as "Found unmasked nulls for non-nullable StructArray field", which
-        // names neither the output nor anything a user can do.
-        var dir = TempDir("pz-delta-emptypart");
+        // partition_by is honoured only by table CREATION, so a run against a table an earlier run
+        // partitioned need not declare it — and routinely does not. The guard's authority therefore has
+        // to be the table's own partition columns; reading options.PartitionBy would leave every such
+        // run unprotected.
+        var dir = TempDir("pz-delta-emptypart-undeclared");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 2, partitionBy: ["dt"]);
+        await using var sink = await OpenSink(dir);
+        var spec = new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>());
+
+        await using var s = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(9L, string.Empty, 1.0)]), default));
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
+        Assert.Contains("'dt'", ex.Message);
+    }
+
+    [Fact]
+    public async Task Every_offending_partition_column_is_named_in_one_refusal()
+    {
+        // Aggregate, never fail-one-at-a-time: a user fixing one column per run is a user running the
+        // pipeline once per column.
+        var dir = TempDir("pz-delta-emptypart-many");
+        await using var sink = await OpenSink(dir);
+        var spec = new OutputSpec("lake", "orders", "append", "fail_on_change",
+            new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt", "region" } });
+
+        await using var s = await sink.BeginWriteAsync(spec, TwoPartitions, default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(TwoPartitionRows(string.Empty, string.Empty), default));
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
+        Assert.Contains("'dt'", ex.Message);
+        Assert.Contains("'region'", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_null_partition_value_is_not_mistaken_for_an_empty_one()
+    {
+        // Measured: GetValueLength reports 0 for a NULL entry in every one of these encodings, so an
+        // unguarded length test would refuse a legitimately null partition value. A null written is a
+        // null read back — nothing changes on the way through — so it is allowed, and this is what
+        // keeps the guard from being a length test that happens to work.
+        var dir = TempDir("pz-delta-nullpart");
         await using var sink = await OpenSink(dir);
         var spec = new OutputSpec("lake", "orders", "append", "fail_on_change",
             new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } });
 
-        await using var s = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default);
-        await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, string.Empty, 1.0)]), default);
+        await using (var s = await sink.BeginWriteAsync(spec, NullableDt, default))
+        {
+            await s.WriteBatchAsync(NullableDtRows([(1L, null, 1.0), (2L, "x", 2.0)]), default);
+            Assert.Equal(2, (await s.CommitAsync(default)).RowsWritten);
+        }
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
+        // RowCountAsync, not CountAsync: the shaped read cannot represent the null it just wrote.
+        Assert.Equal(2, await DeltaReader.RowCountAsync(Path.Combine(dir, "orders")));
+    }
+
+    [Fact]
+    public async Task An_empty_binary_partition_value_is_refused_too()
+    {
+        // Not defensive breadth: measured. A nullable BINARY partition column holding zero bytes lands
+        // in the same 'dt=' directory and reads back null exactly as an empty string does, so the guard
+        // covers the binary encodings as well as the string ones.
+        var dir = TempDir("pz-delta-emptybin");
+        await using var sink = await OpenSink(dir);
+        var spec = new OutputSpec("lake", "orders", "append", "fail_on_change",
+            new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } });
+
+        await using var s = await sink.BeginWriteAsync(spec, BinaryDt, default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(BinaryDtRows(), default));
         Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
-        Assert.Contains("NOT NULL", ex.Message);
-        Assert.False(ex.IsTransient);
+        Assert.Contains("'dt'", ex.Message);
+    }
+
+    [Fact]
+    public async Task An_empty_value_in_an_ordinary_column_is_left_alone()
+    {
+        // The discriminating control. Only a PARTITION value becomes a directory name, so only a
+        // partition value can turn into a null on the way through. Refusing an empty string in an
+        // ordinary column would refuse legitimate data.
+        var dir = TempDir("pz-delta-emptyordinary");
+        await using var sink = await OpenSink(dir);
+        var spec = new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>());
+
+        await using (var s = await sink.BeginWriteAsync(spec, NullableDt, default))
+        {
+            await s.WriteBatchAsync(NullableDtRows([(1L, string.Empty, 1.0)]), default);
+            Assert.Equal(1, (await s.CommitAsync(default)).RowsWritten);
+        }
+
+        var rows = await DeltaReader.RowsAsync(Path.Combine(dir, "orders"));
+        Assert.Equal(string.Empty, Assert.Single(rows).Dt);
     }
 
     [Fact]
@@ -369,6 +476,35 @@ public class MergeErrorTests
         }
 
         return new RecordBatch(WithArchived, [id.Build(), dt.Build(), amt.Build(), archived.Build()], rows.Count);
+    }
+
+    /// <summary>Two partition columns, so an aggregate refusal has more than one thing to name.</summary>
+    private static readonly Schema TwoPartitions = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(true))
+        .Field(f => f.Name("region").DataType(StringType.Default).Nullable(true))
+        .Build();
+
+    private static RecordBatch TwoPartitionRows(string dt, string region) =>
+        new(TwoPartitions,
+            [
+                new Int64Array.Builder().Append(1L).Build(),
+                new StringArray.Builder().Append(dt).Build(),
+                new StringArray.Builder().Append(region).Build(),
+            ],
+            1);
+
+    /// <summary>A BINARY partition column: the same empty-value defect as a string one, measured.</summary>
+    private static readonly Schema BinaryDt = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(BinaryType.Default).Nullable(true))
+        .Build();
+
+    private static RecordBatch BinaryDtRows()
+    {
+        var dt = new BinaryArray.Builder();
+        dt.Append(ReadOnlySpan<byte>.Empty);
+        return new RecordBatch(BinaryDt, [new Int64Array.Builder().Append(1L).Build(), dt.Build()], 1);
     }
 
     /// <summary><see cref="DeltaTestTable.Schema"/> with 'dt' nullable, so a null can reach a key.</summary>

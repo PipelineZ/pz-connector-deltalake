@@ -85,6 +85,39 @@ internal static class DeltaReader
         _ => throw new InvalidOperationException($"unexpected dictionary index type {indices.GetType().Name}"),
     };
 
+    /// <summary>A row count that decodes no values. <see cref="CountAsync"/> goes through
+    /// <see cref="RowsAsync"/> and therefore through <see cref="Text"/>, which cannot represent a NULL
+    /// in a string column — its tuple carries a non-nullable string. A null PARTITION value is
+    /// legitimate and delta-rs returns it as a dictionary-encoded column with a null index, so a test
+    /// that writes one has to count without reading.</summary>
+    public static Task<long> RowCountAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                var count = 0L;
+                var query = new SelectQuery("select count(*) from tbl") { TableAlias = "tbl" };
+                await foreach (var batch in table.QueryAsync(query, default))
+                {
+                    using (batch)
+                    {
+                        count = ((Int64Array)batch.Column(0)).GetValue(0) ?? 0;
+                    }
+                }
+
+                return count;
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
     /// <summary>The table's column names, as delta-rs reports them after the write. A row count cannot
     /// tell a schema that widened from one that quietly dropped the extra column.</summary>
     public static Task<IReadOnlyList<string>> ColumnsAsync(string location) =>

@@ -14,8 +14,8 @@ namespace Pz.Connector.DeltaLake;
 /// Replace and merge cannot: their semantics are defined over the entire input, so for those the
 /// buffer IS the write.</summary>
 internal sealed class DeltaWriteSession(
-    ITable table, Schema schema, IReadOnlyList<string> targetColumns, DeltaWriteOptions options,
-    string output) : ISinkWriteSession
+    ITable table, Schema schema, IReadOnlyList<string> targetColumns,
+    IReadOnlyList<string> tablePartitions, DeltaWriteOptions options, string output) : ISinkWriteSession
 {
     private readonly List<RecordBatch> buffered = [];
     private long bufferedBytes;
@@ -26,6 +26,7 @@ internal sealed class DeltaWriteSession(
     public async ValueTask WriteBatchAsync(RecordBatch batch, CancellationToken ct)
     {
         this.ThrowIfTerminated();
+        RefuseEmptyPartitionValues(batch, tablePartitions, output);
 
         var clone = batch.Clone();
         this.buffered.Add(clone);
@@ -236,29 +237,25 @@ internal sealed class DeltaWriteSession(
         }
     }
 
-    /// <summary>Refuses a merge whose keys cannot match, rather than letting it report success over a
-    /// duplicated row. Two shapes, both measured against real delta-rs on a real table:
+    /// <summary>Refuses a merge whose keys hold a NULL, rather than letting it report success over a
+    /// duplicated row. Measured against real delta-rs on a real table: the ON clause is
+    /// <c>target.k = source.k</c>, and SQL equality against a null is null, never true — so the incoming
+    /// row matches nothing, WHEN NOT MATCHED fires, and a row whose key is already in the table gains a
+    /// second copy. Nothing errors, and no row count looks wrong.
     ///
-    /// A NULL anywhere in a key column. The ON clause is <c>target.k = source.k</c>, and SQL equality
-    /// against a null is null, never true — so the incoming row matches nothing, WHEN NOT MATCHED fires,
-    /// and a row whose key is already in the table gains a second copy. Nothing errors, and no row count
-    /// looks wrong.
+    /// The other value that cannot match — an empty partition value, which Delta stores as a null — is
+    /// not checked here. It is refused for every strategy, per batch, in
+    /// <see cref="RefuseEmptyPartitionValues"/>, so it cannot reach a merge commit; catching it a second
+    /// time here would only mean two messages for one cause.
     ///
-    /// An EMPTY STRING in a key that is also a partition column. Delta encodes a partition value into a
-    /// directory name, where an empty string is indistinguishable from a null: a row written with '' is
-    /// read back with null in that column, and the next merge on that key duplicates it exactly as
-    /// above. Measured both ways round — the duplicate appears with and without a derived partition
-    /// predicate, so this is a property of the encoding, not of the pruning.
-    ///
-    /// Both checks are bounded. Nulls go through Arrow's own NullCount, so a column with none costs one
-    /// read for the whole batch; only a key that is ALSO a partition column, and only a string one, is
-    /// walked row by row. Neither message names a value — a partition value is user data.</summary>
+    /// This check is bounded: nulls go through Arrow's own NullCount, so a key column with none costs
+    /// one read for the whole batch. The message names columns, never values. It sees only the buffer,
+    /// not the target table — a null key already sitting in the table that no incoming row touches is
+    /// outside its reach, and reading the whole target on every merge would cost more than the operation
+    /// it protects.</summary>
     private void RefuseUnmatchableKeys()
     {
-        var partitionKeys = options.Keys
-            .Where(k => options.PartitionBy.Contains(k, StringComparer.Ordinal)).ToHashSet(StringComparer.Ordinal);
         var nullable = new SortedSet<string>(StringComparer.Ordinal);
-        var empty = new SortedSet<string>(StringComparer.Ordinal);
 
         foreach (var batch in this.buffered)
         {
@@ -267,69 +264,113 @@ internal sealed class DeltaWriteSession(
                 // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive. A key
                 // naming no column of the batch was already refused at BeginWriteAsync.
                 var index = batch.Schema.GetFieldIndex(key, StringComparer.Ordinal);
-                if (index < 0)
-                {
-                    continue;
-                }
-
-                var array = batch.Column(index);
-                if (array.NullCount > 0)
+                if (index >= 0 && batch.Column(index).NullCount > 0)
                 {
                     nullable.Add(key);
-                }
-
-                if (partitionKeys.Contains(key) && HasEmptyString(array))
-                {
-                    empty.Add(key);
                 }
             }
         }
 
-        if (nullable.Count == 0 && empty.Count == 0)
+        if (nullable.Count == 0)
         {
             return;
         }
 
-        var problems = new List<string>();
-        if (nullable.Count > 0)
-        {
-            problems.Add($"merge key column(s) {Names(nullable)} contain null values, and a null never " +
-                "equals anything — those rows would be inserted a second time instead of updating the " +
-                "rows they belong to");
-        }
-
-        if (empty.Count > 0)
-        {
-            problems.Add($"merge key column(s) {Names(empty)} are partition columns holding an empty " +
-                "string, which Delta stores in a directory name where it is indistinguishable from a " +
-                "null — those rows read back as null and would be inserted a second time on every run");
-        }
-
         throw DeltaErrors.Fail(DeltaErrors.UnmatchableMergeKey,
-            $"output '{output}': {string.Join("; ", problems)}",
-            "filter or coalesce those columns in the pipeline SQL so every key value is present and " +
-            "non-empty, or choose keys that are");
-
-        static string Names(IEnumerable<string> columns) => string.Join(", ", columns.Select(c => $"'{c}'"));
+            $"output '{output}': merge key column(s) " +
+            $"{string.Join(", ", nullable.Select(c => $"'{c}'"))} contain null values, and a null never " +
+            "equals anything — those rows would be inserted a second time instead of updating the rows " +
+            "they belong to",
+            "filter or coalesce those columns in the pipeline SQL so every key value is present, or " +
+            "choose keys that are");
     }
 
-    /// <summary>Whether any row of a string column holds the empty string. Every string encoding is
-    /// handled, because which one a batch arrives in depends on the plan that produced it, not on the
-    /// column's Delta type. A non-string array answers false: no other type has a value that Delta's
-    /// partition encoding collapses into a null.</summary>
-    private static bool HasEmptyString(IArrowArray array)
+    /// <summary>Refuses a batch carrying an empty value in a partition column, on EVERY strategy.
+    ///
+    /// Measured against real delta-rs: Delta writes a partition value into a directory name, and an
+    /// empty value produces the directory <c>col=</c>, which it cannot tell from a null. On a NULLABLE
+    /// partition column the write therefore SUCCEEDS and the row reads back with null in that column —
+    /// a silent change to the user's data, on the plainest append there is, with no error anywhere. On a
+    /// NOT NULL one delta-rs fails the insert instead, but only after the table exists and after any
+    /// generation an append already flushed has committed.
+    ///
+    /// So it is checked per batch, before the batch is buffered, rather than at commit: an append
+    /// flushes bounded generations, and a generation is a commit that cannot be unwound.
+    ///
+    /// The authority is the TABLE's partition columns, not <c>partition_by</c>. A run against a table an
+    /// earlier run partitioned need not declare partition_by at all, so the option is not what decides
+    /// which columns become directory names.
+    ///
+    /// BINARY columns are covered as well as string ones, and that is measured, not defensive: a
+    /// nullable binary partition column holding zero bytes reads back null exactly as an empty string
+    /// does. Every string encoding derives from one of the three binary array types below, so those
+    /// three cover all six. Fixed-width types have no empty value and are not walked.</summary>
+    private static void RefuseEmptyPartitionValues(
+        RecordBatch batch, IReadOnlyList<string> partitions, string output)
     {
+        if (partitions.Count == 0)
+        {
+            return;
+        }
+
+        var offenders = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var column in partitions)
+        {
+            // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive. A partition
+            // column the batch does not carry is Reconcile's problem, not this one.
+            var index = batch.Schema.GetFieldIndex(column, StringComparer.Ordinal);
+            if (index >= 0 && HasEmptyValue(batch.Column(index)))
+            {
+                offenders.Add(column);
+            }
+        }
+
+        if (offenders.Count == 0)
+        {
+            return;
+        }
+
+        // Every offending column at once: a user fixing one column per run is a user running the
+        // pipeline once per column. The message names columns and never a value.
+        throw DeltaErrors.Fail(DeltaErrors.UnusablePartitionValue,
+            $"output '{output}': partition column(s) " +
+            $"{string.Join(", ", offenders.Select(c => $"'{c}'"))} contain an empty value. Delta writes " +
+            "a partition value into a directory name, where an empty value is indistinguishable from a " +
+            "null, so those rows would read back as null in that column — and a merge keyed on such a " +
+            "column would insert a second copy of them on every run",
+            "filter those rows out in the pipeline SQL, coalesce the column to a non-empty placeholder, " +
+            "or partition by a column that is never empty");
+    }
+
+    /// <summary>Whether any non-null row of a variable-length column holds a zero-length value. The
+    /// length comes from the offsets rather than from a materialized value, so this costs no allocation
+    /// per row — it runs on every batch of every partitioned write.
+    ///
+    /// Nulls are skipped, and they have to be: measured, <c>GetValueLength</c> reports 0 for a null
+    /// entry in every one of these encodings, so an unguarded length test would report a legitimately
+    /// null partition value as an empty one. A null written is a null read back; only an empty value
+    /// changes on the way through.</summary>
+    private static bool HasEmptyValue(IArrowArray array)
+    {
+        // StringArray/LargeStringArray/StringViewArray derive from these three, so the three cases
+        // cover all six encodings a batch may arrive in — which one it is depends on the plan that
+        // produced the batch, not on the column's Delta type.
+        Func<int, int>? length = array switch
+        {
+            BinaryArray a => a.GetValueLength,
+            LargeBinaryArray a => a.GetValueLength,
+            BinaryViewArray a => a.GetValueLength,
+            _ => null,
+        };
+
+        if (length is null)
+        {
+            return false;
+        }
+
         for (var row = 0; row < array.Length; row++)
         {
-            var text = array switch
-            {
-                StringArray a => a.GetString(row),
-                StringViewArray a => a.GetString(row),
-                LargeStringArray a => a.GetString(row),
-                _ => null,
-            };
-
-            if (text is { Length: 0 })
+            if (!array.IsNull(row) && length(row) == 0)
             {
                 return true;
             }
