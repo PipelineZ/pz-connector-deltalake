@@ -35,10 +35,17 @@ internal static class DeltaTypeSupport
         // FixedSizeList is the one candidate where CREATE and INSERT disagreed: CREATE accepts a
         // fixed_size_list column, but a real INSERT through DeltaLake.Net 0.33.0 fails --
         // "column types must match schema types, expected List(Int64, field: 'element') but found
-        // List(Int64)" -- because the FFI marshaling reports the array back as a schema-mismatched
-        // plain List rather than the FixedSizeList the table was created with. Since this guard
-        // protects the write path (BeginWriteAsync), not the create path, the stricter (insert)
-        // observation governs: refused, regardless of element or list-size.
+        // List(Int64)" at first read as an FFI marshaling defect. It is narrower than that: Delta's
+        // canonical Arrow round-trip expects the list's inner field named "element"; Apache.Arrow's
+        // own `new FixedSizeListType(valueType, listSize)` constructor -- the shape this connector's
+        // own type-construction path uses -- names it "item" instead. Verified directly: rebuilding
+        // the same probe with the inner field explicitly named "element" makes BOTH create and insert
+        // succeed. So this is not a permanent block on ARRAY-shaped columns, only on the default Arrow
+        // field name this connector currently produces for one -- refusing is still correct today
+        // (nothing in this connector names that field "element" yet), but a future task that wants to
+        // support ARRAY columns should rename the inner field before assuming FixedSizeList is a dead
+        // end. Since this guard protects the write path (BeginWriteAsync), not the create path, the
+        // stricter (insert) observation governs regardless: refused as the connector stands today.
         ArrowTypeId.FixedSizeList => false,
         ArrowTypeId.Struct => ((StructType)type).Fields.All(f => IsWritable(f.DataType)),
         ArrowTypeId.List => IsWritable(((ListType)type).ValueDataType),

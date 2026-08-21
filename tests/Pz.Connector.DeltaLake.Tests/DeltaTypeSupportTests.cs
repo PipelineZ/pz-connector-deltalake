@@ -147,14 +147,18 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             // write through that fails Rust-side with no pz context, which is exactly what this task
             // exists to prevent.
             //
-            // For every REFUSED candidate observed so far, ProbeInsertAsync's own internal
+            // For every REFUSED candidate EXCEPT FixedSizeList, ProbeInsertAsync's own internal
             // CreateTableAsync call fails first, with the identical message CREATE alone produces --
-            // InsertAsync and the NullArrayFor-built value are never reached for those. So for the
-            // negative set, "create and insert agree" is the same create-time schema check observed
-            // twice, not two independent signals; it does NOT prove delta-rs's write-time conversion
-            // itself refuses these types, only that the type never gets that far. For every ACCEPTED
-            // candidate, by contrast, InsertAsync genuinely runs to completion and DOES exercise the
-            // separate write path -- that half of the agreement is real, independent evidence.
+            // InsertAsync and the SingleValueArrayFor-built value are never reached for those. So for
+            // that part of the negative set, "create and insert agree" is the same create-time schema
+            // check observed twice, not two independent signals; it does NOT prove delta-rs's
+            // write-time conversion itself refuses these types, only that the type never gets that far.
+            // FixedSizeList is the one named exception: its CREATE succeeds, so ProbeInsertAsync's
+            // InsertAsync call genuinely runs and is the ONLY evidence that refuses it -- the opposite
+            // situation from every other refused candidate, and exactly the case Finding 5 was raised
+            // to make explicit rather than paper over with a blanket claim. For every ACCEPTED
+            // candidate, InsertAsync likewise genuinely runs to completion and DOES exercise the
+            // separate write path -- that half of the agreement is real, independent evidence too.
             if (createAccepted != insertAccepted)
             {
                 output.WriteLine(
