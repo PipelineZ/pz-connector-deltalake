@@ -245,7 +245,11 @@ internal sealed class DeltaLakeSink : ISink
     /// rather than provoked. Which delta-rs failures do and do not mean "there is no table here" is the
     /// single most consequential branch in this file — a wrong answer turns a wrong credential into a
     /// create attempt — and no arrangement of real files can make a load fail one way while a create at
-    /// the same location would have succeeded, so the branch is otherwise only half observable.</summary>
+    /// the same location would have succeeded, so the branch is otherwise only half observable.
+    ///
+    /// The sink takes OWNERSHIP of whatever the factory returns: it is constructed once, on the
+    /// big-stack thread, and disposed by <see cref="DisposeAsync"/>. A caller must not dispose it
+    /// itself, nor hand the same instance to two sinks.</summary>
     internal DeltaLakeSink(ConnectorConfig config, Func<IEngine> engineFactory)
     {
         this.config = config;
@@ -278,6 +282,19 @@ internal sealed class DeltaLakeSink : ISink
                 $"output '{spec.Output}': merge key(s) {string.Join(", ", missing.Select(k => $"'{k}'"))} " +
                 "are not columns of the data being written",
                 "correct 'keys' to name columns the pipeline actually selects");
+        }
+
+        // Merge is refused HERE, not at commit: refusing at commit means BeginWriteAsync has already
+        // created the table and the whole pipeline has already been buffered, leaving an orphan table
+        // behind for a strategy that was never going to write to it. It sits after the checks above
+        // rather than in DeltaWriteOptions.From so a merge output still learns about a bad option or a
+        // key that names no column — the validation Tasks 12-14 depend on — instead of only learning
+        // that merge does not exist yet.
+        if (options.Mode == "merge")
+        {
+            throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
+                $"output '{spec.Output}': strategy 'merge' is not implemented by this connector yet",
+                "use strategy: append or replace, or pin a connector version whose release notes list merge");
         }
 
         var location = DeltaLocation.Resolve(

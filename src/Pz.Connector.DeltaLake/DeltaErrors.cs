@@ -86,6 +86,32 @@ internal static class DeltaErrors
 
     private const string DuplicateMergeMarker = "multiple source rows";
 
+    /// <summary>Truncates delta-rs's row-data preview, keeping the row count. Both halves matter: the
+    /// count ("2 rows failed validation check") is the entire diagnostic and carries no data, while
+    /// everything from "Preview of invalid data:" onward is an ASCII table of the offending ROWS —
+    /// every column of them, id and amount and name alike — which a validation failure would otherwise
+    /// carry into a PzConnectorException, a run artifact and a log. Reproduced against real delta-rs on
+    /// the plainest write there is: a batch holding nulls in a column the table declares NOT NULL. No
+    /// pre-flight guard can prevent that one, because an Arrow schema's nullability flag says nothing
+    /// about whether the batch actually contains nulls — refusing on the declaration would refuse
+    /// legitimate writes — so redaction here is the only place it can be stopped.</summary>
+    private static readonly Regex InvalidDataPreview = new(
+        @"(?i)(Preview of invalid data:).*", RegexOptions.Compiled | RegexOptions.Singleline);
+
+    /// <summary>The single-cell sibling of the shape above: delta-rs reports a failed CHECK constraint
+    /// or column invariant as "Invalid data found: validation check failed with value &lt;value&gt;",
+    /// putting one offending cell in the message rather than a table of rows.</summary>
+    private static readonly Regex InvalidDataValue = new(
+        @"(?i)(validation check failed with value).*", RegexOptions.Compiled | RegexOptions.Singleline);
+
+    /// <summary>A contiguous run of ASCII box-table lines, redacted whole. This is deliberate
+    /// duplication of <see cref="InvalidDataPreview"/>: an enumeration of the two markers delta-rs uses
+    /// today rots the moment upstream renames one, whereas the box table IS the format the data comes
+    /// in. Over-redaction is the safe direction in this file, and a legitimate error line beginning
+    /// with '|' or '+' followed by a rule character is not a shape any delta-rs message uses.</summary>
+    private static readonly Regex BoxTableRun = new(
+        @"(?m)(?:^[ \t]*[|+][-+| ][^\n]*\n?)+", RegexOptions.Compiled);
+
     /// <summary>Strips anything shaped like a credential out of a third-party message before it reaches
     /// a user-visible error. delta-rs is free to put storage options in its own error text; this
     /// connector is not free to pass them on. The keyword sits inside <c>[a-z0-9_]*...[a-z0-9_]*</c>
@@ -173,7 +199,13 @@ internal static class DeltaErrors
 
     private static string Redact(string message)
     {
-        var redacted = UrlEmbeddedCredential.Replace(message, "://<redacted>@");
+        // User DATA first, credentials after: the data shapes are truncations to end-of-message, so
+        // running them first also removes anything a later pattern would have had to scan.
+        var redacted = InvalidDataPreview.Replace(message, "$1 <redacted>");
+        redacted = InvalidDataValue.Replace(redacted, "$1 <redacted>");
+        redacted = BoxTableRun.Replace(redacted, "<redacted>\n");
+
+        redacted = UrlEmbeddedCredential.Replace(redacted, "://<redacted>@");
         redacted = BearerTokenValue.Replace(redacted, "Bearer <redacted>");
         return SecretShapedKeyValue.Replace(redacted, "$1=<redacted>");
     }

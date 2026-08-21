@@ -85,6 +85,26 @@ internal static class DeltaReader
         _ => throw new InvalidOperationException($"unexpected dictionary index type {indices.GetType().Name}"),
     };
 
+    /// <summary>The table's column names, as delta-rs reports them after the write. A row count cannot
+    /// tell a schema that widened from one that quietly dropped the extra column.</summary>
+    public static Task<IReadOnlyList<string>> ColumnsAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                return (IReadOnlyList<string>)[.. table.Schema().FieldsList.Select(f => f.Name)];
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
     /// <summary>How many commits the table's transaction log holds. An append that flushes bounded
     /// generations produces more of them than one that buffers the whole write and commits once, which
     /// is the only externally visible difference between the two — a row count cannot tell them

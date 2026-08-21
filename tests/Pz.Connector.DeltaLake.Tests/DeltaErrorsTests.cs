@@ -190,4 +190,81 @@ public class DeltaErrorsTests
         var thrown = Assert.Throws<OperationCanceledException>(() => DeltaErrors.Translate(cancelled, "insert", []));
         Assert.Same(cancelled, thrown);
     }
+    [Fact]
+    public void Translate_never_leaks_the_rows_delta_rs_previews_on_a_validation_failure()
+    {
+        // Verbatim from real delta-rs 0.33.0: a batch holding nulls in a column the table declares NOT
+        // NULL. Reachable on the plainest append there is, and no pre-flight guard can stop it — an
+        // Arrow schema's nullability flag says nothing about whether the batch contains nulls.
+        var raw = new DeltaLakeException(
+            "Generic DeltaTable error: External error: Invalid data found: 2 rows failed validation check.\n" +
+            "Preview of invalid data:\n" +
+            "\n" +
+            "+-----+----+----------+\n" +
+            "| id  | dt | amt      |\n" +
+            "+-----+----+----------+\n" +
+            "| 777 |    | 31337.5  |\n" +
+            "| 778 |    | 42424.25 |\n" +
+            "+-----+----+----------+", 1);
+
+        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("777", ex.Message);
+        Assert.DoesNotContain("778", ex.Message);
+        Assert.DoesNotContain("31337.5", ex.Message);
+        Assert.DoesNotContain("42424.25", ex.Message);
+        Assert.DoesNotContain("|", ex.Message);
+
+        // The row count is the whole diagnostic and carries no data, so it survives.
+        Assert.Contains("2 rows failed validation check", ex.Message);
+    }
+
+    [Fact]
+    public void Translate_never_leaks_the_single_value_a_failed_check_constraint_reports()
+    {
+        // The other value-carrying shape shipped in libdelta_rs_bridge.so: one offending cell rather
+        // than a table of rows.
+        var raw = new DeltaLakeException(
+            "Generic DeltaTable error: Invalid data found: validation check failed with value 31337.5", 1);
+        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("31337.5", ex.Message);
+        Assert.Contains("validation check failed with value <redacted>", ex.Message);
+    }
+
+    [Fact]
+    public void Translate_strips_a_row_table_even_when_the_marker_above_it_is_not_recognized()
+    {
+        // Belt and braces: an enumeration of the markers delta-rs uses today rots the moment upstream
+        // renames one, but the box table IS the format the data arrives in.
+        var raw = new DeltaLakeException(
+            "Generic DeltaTable error: some future wording nobody enumerated\n" +
+            "+-----+----------+\n" +
+            "| id  | amt      |\n" +
+            "+-----+----------+\n" +
+            "| 777 | 31337.5  |\n" +
+            "+-----+----------+", 1);
+
+        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("777", ex.Message);
+        Assert.DoesNotContain("31337.5", ex.Message);
+        Assert.Contains("some future wording nobody enumerated", ex.Message);
+    }
+
+    [Fact]
+    public void Translate_still_redacts_a_credential_that_follows_a_row_preview()
+    {
+        // The data patterns run first and truncate to end-of-message, so a credential could only be
+        // missed if it sat BEFORE the preview — this pins that the two stages compose.
+        var raw = new DeltaLakeException(
+            "Generic DeltaTable error: AWS_SECRET_ACCESS_KEY=hunter2 rejected: Invalid data found: " +
+            "1 rows failed validation check.\nPreview of invalid data:\n| id |\n| 777 |", 1);
+
+        var ex = DeltaErrors.Translate(raw, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("hunter2", ex.Message);
+        Assert.DoesNotContain("777", ex.Message);
+    }
+
 }

@@ -73,6 +73,64 @@ public class WriteSessionTests
     }
 
     [Fact]
+    public async Task A_path_option_decides_where_the_table_is_written()
+    {
+        // The one option that decides where the data LANDS. Nothing else in this file passes it, so
+        // without this a regression writes into <root>/<output> — appending rows into a different Delta
+        // table entirely, with no diagnostic anywhere.
+        var dir = TempDir("pz-delta-path");
+        await using var sink = await OpenSink(dir);
+        var spec = Out("append", ("path", "curated/orders"));
+
+        await using (var session = await sink.BeginWriteAsync(spec, DeltaTestTable.Schema, default))
+        {
+            await session.WriteBatchAsync(DeltaTestTable.Rows(0, 12), default);
+            await session.CommitAsync(default);
+        }
+
+        Assert.True(Directory.Exists(Path.Combine(dir, "curated", "orders", "_delta_log")));
+        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
+        Assert.Equal(12, await DeltaReader.CountAsync(Path.Combine(dir, "curated", "orders")));
+    }
+
+    [Fact]
+    public async Task A_validation_failure_never_carries_the_offending_rows_into_the_error()
+    {
+        // The leak reproduced end to end on the append path this task ships, through the real sink and
+        // real delta-rs — not a hand-written message. The table declares 'dt' NOT NULL; the incoming
+        // schema declares it nullable, which is true of the SCHEMA and says nothing about whether the
+        // batch holds nulls, so Reconcile cannot refuse it without refusing legitimate writes. delta-rs
+        // then fails the insert with a preview of the offending rows — every column of them.
+        var dir = TempDir("pz-delta-leak");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 4);
+
+        await using var sink = await OpenSink(dir);
+        var nullableDt = new Schema.Builder()
+            .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+            .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(true))
+            .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
+            .Build();
+
+        var id = new Int64Array.Builder();
+        var dt = new StringArray.Builder();
+        var amt = new DoubleArray.Builder();
+        id.Append(777);
+        dt.AppendNull();
+        amt.Append(31337.5);
+        var batch = new RecordBatch(nullableDt, [id.Build(), dt.Build(), amt.Build()], 1);
+
+        await using var session = await sink.BeginWriteAsync(Out(), nullableDt, default);
+        await session.WriteBatchAsync(batch, default);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await session.CommitAsync(default));
+
+        Assert.Contains(DeltaErrors.WriteFailed, ex.Message);
+        Assert.DoesNotContain("777", ex.Message);
+        Assert.DoesNotContain("31337.5", ex.Message);
+        Assert.DoesNotContain("|", ex.Message);
+        Assert.Contains("1 rows failed validation check", ex.Message);
+    }
+
+    [Fact]
     public async Task Begin_refuses_an_unwritable_arrow_type_before_any_data_moves()
     {
         var dir = TempDir("pz-delta-badtype");
@@ -168,7 +226,10 @@ public class WriteSessionTests
             Assert.Equal(3, (await session.CommitAsync(default)).RowsWritten);
         }
 
+        // The row count alone would still read 7 if delta-rs silently DROPPED the extra column instead
+        // of widening the table, which is the one thing this test is named for.
         Assert.Equal(7, await DeltaReader.CountAsync(Path.Combine(dir, "orders")));
+        Assert.Contains("note", await DeltaReader.ColumnsAsync(Path.Combine(dir, "orders")));
     }
 
     [Fact]
@@ -215,8 +276,12 @@ public class WriteSessionTests
         Assert.Equal("dt >= '2026-01-01'", opts.MergePredicate);
         Assert.Equal(65536L, opts.TargetFileBytes);
 
-        // Every name in the declared list is read by From, so a name can never be validated and then
-        // ignored — the failure this whole surface exists to prevent.
+        // A tripwire on the list's CONTENTS, not on whether each name is acted on — 'path' is not read
+        // by From at all; the sink reads it when it resolves where the table lives. Adding a name here
+        // without a test that watches it DO something is how an option becomes validated-and-ignored,
+        // the failure this whole surface exists to prevent. All four are watched: partition_by,
+        // merge_predicate and target_file_bytes by the assertions above, path by
+        // A_path_option_decides_where_the_table_is_written.
         Assert.Equal(
             ["merge_predicate", "partition_by", "path", "target_file_bytes"],
             DeltaLakeSchemas.WriteOptions.Order(StringComparer.Ordinal));
@@ -774,19 +839,19 @@ public class WriteSessionTests
     }
 
     [Fact]
-    public async Task Merge_is_refused_with_a_code_until_it_is_implemented()
+    public async Task Merge_is_refused_at_begin_so_it_never_creates_a_table_it_cannot_write_to()
     {
-        // A bare NotImplementedException would escape pz's `catch (PzConnectorException)` as a fatal
-        // with no output name and no next step — after BeginWriteAsync already created the table.
+        // Refusing at commit would mean BeginWriteAsync had already created the table and the whole
+        // pipeline had already been buffered, leaving an orphan table behind for a strategy that was
+        // never going to write to it.
         var dir = TempDir("pz-delta-merge-todo");
         await using var sink = await OpenSink(dir);
-        await using var session = await sink.BeginWriteAsync(
-            Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default);
-        await session.WriteBatchAsync(DeltaTestTable.Rows(0, 4), default);
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await session.CommitAsync(default));
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await sink.BeginWriteAsync(
+            Out("merge") with { Keys = ["id"] }, DeltaTestTable.Schema, default));
         Assert.Contains("PZDL", ex.Message);
         Assert.Contains("merge", ex.Message);
+        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
     }
 
     [Fact]

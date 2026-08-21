@@ -172,10 +172,11 @@ internal sealed class DeltaWriteSession(
         }
     }
 
-    /// <summary>Merge lands in a later task. Until then it refuses with a code rather than a bare
-    /// NotImplementedException: pz carries a connector failure through <c>catch
-    /// (PzConnectorException)</c>, so an uncoded exception here would escape as a fatal with no output
-    /// name and no next step — after BeginWriteAsync has already created the table.</summary>
+    /// <summary>Unreachable while merge is unimplemented — BeginWriteAsync refuses the strategy before
+    /// a session exists, so no table is created and nothing is buffered for a write that cannot happen.
+    /// Coded rather than a bare NotImplementedException all the same: pz carries a connector failure
+    /// through <c>catch (PzConnectorException)</c>, and an uncoded exception on a reachable path would
+    /// escape as a fatal with no output name and no next step.</summary>
     private Task MergeAsync(CancellationToken ct) =>
         throw DeltaErrors.Fail(DeltaErrors.WriteFailed,
             $"output '{output}': strategy 'merge' is not implemented by this connector yet",
