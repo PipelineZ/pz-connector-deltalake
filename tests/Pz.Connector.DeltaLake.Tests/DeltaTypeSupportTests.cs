@@ -1,5 +1,7 @@
 using Apache.Arrow;
+using Apache.Arrow.Arrays;
 using Apache.Arrow.Types;
+using DeltaLake.Errors;
 using DeltaLake.Table;
 using Pz.Connectors.Abstractions;
 using Xunit;
@@ -9,16 +11,34 @@ namespace Pz.Connector.DeltaLake.Tests;
 
 public class DeltaTypeSupportTests(ITestOutputHelper output)
 {
-    // Nested candidates cover the Struct/List/Map recursion in DeltaTypeSupport.IsWritable: one whose
-    // inner type is on the refusal list (must come back unwritable through the recursion, not just at
-    // the top level) and one whose inner type is ordinary (must stay writable). Time32 has its own
-    // entry because the refusal list names it explicitly -- an untested entry there would be exactly
-    // the "guessed, not observed" mistake this task exists to avoid.
+    // Candidates cover every constructible Apache.Arrow.Types.ArrowTypeId value -- not just the ones
+    // the brief happened to guess -- because "the list is observed, not guessed" means observing the
+    // whole enum, not a convenient subset. Two ArrowTypeId values are absent on purpose:
+    //   - RecordBatch has no concrete IArrowType implementation in Apache.Arrow 23.0.0 (confirmed via
+    //     reflection over the shipped assembly: no "RecordBatchType" class exists, and
+    //     Apache.Arrow.RecordBatch itself implements IArrowArray, not IArrowType). It identifies a
+    //     container format, not a column type -- there is no Field whose DataType could ever be
+    //     ArrowTypeId.RecordBatch, so there is nothing to place in a Schema and nothing to probe.
+    //   - Extension is represented by Bool8Type below (a concrete, shipped ExtensionType subclass)
+    //     rather than by a bare "ArrowTypeId.Extension" instance, because Apache.Arrow.ExtensionType
+    //     itself is abstract -- there is no default/bare instance of it to construct. Bool8Type.Default
+    //     genuinely reports TypeId == ArrowTypeId.Extension (confirmed via reflection), so this is a
+    //     real observation of that TypeId, not a stand-in for one.
+    //
+    // Nested candidates cover the Struct/List/Map recursion in DeltaTypeSupport.IsWritable: for each of
+    // List, Struct, and Map, one candidate whose inner type is on the refusal list (must come back
+    // unwritable through the recursion, not just at the top level) and one whose inner type is
+    // ordinary (must stay writable). Map gets a THIRD: an unwritable type on the KEY side specifically
+    // (map_duration_to_string) -- IsWritable's Map arm is a conjunction of the key and value sides, and
+    // a conjunction with only its second operand ever driven false is an unobserved first operand in
+    // every way that matters. List gets a second nesting level (list_of_list_of_string /
+    // list_of_list_of_interval) so the recursion is proven to actually recurse, not just handle one
+    // level and coincidentally look right for the rest.
     //
     // DurationType has no public constructor in Apache.Arrow 23.0.0 -- only static singletons
     // (DurationType.Second/.Millisecond/.Microsecond/.Nanosecond). The brief's `new
     // DurationType(TimeUnit.Microsecond)` does not compile against the version this project
-    // references; every duration candidate below uses the real API instead.
+    // references; every duration candidate below uses the real singleton API.
     public static TheoryData<string, IArrowType> Candidates() => new()
     {
         { "bool", BooleanType.Default },
@@ -52,6 +72,15 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             new ListType(new Field("item", StringType.Default, true))
         },
         {
+            "list_of_list_of_string",
+            new ListType(new Field("item", new ListType(new Field("item", StringType.Default, true)), true))
+        },
+        {
+            "list_of_list_of_interval",
+            new ListType(new Field("item",
+                new ListType(new Field("item", new IntervalType(IntervalUnit.YearMonth), true)), true))
+        },
+        {
             "struct_containing_duration",
             new StructType([new Field("d", DurationType.Microsecond, true)])
         },
@@ -64,8 +93,35 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             new MapType(StringType.Default, DurationType.Microsecond)
         },
         {
+            "map_duration_to_string",
+            new MapType(DurationType.Microsecond, StringType.Default)
+        },
+        {
             "map_string_to_string",
             new MapType(StringType.Default, StringType.Default)
+        },
+        { "null_type", NullType.Default },
+        { "halffloat", HalfFloatType.Default },
+        { "fixedsizebinary_4", new FixedSizeBinaryType(4) },
+        { "decimal256_50_9", new Decimal256Type(50, 9) },
+        { "decimal32_9_2", new Decimal32Type(9, 2) },
+        { "decimal64_18_4", new Decimal64Type(18, 4) },
+        { "binaryview", BinaryViewType.Default },
+        { "stringview", StringViewType.Default },
+        { "listview_of_string", new ListViewType(new Field("item", StringType.Default, true)) },
+        { "largelist_of_string", new LargeListType(new Field("item", StringType.Default, true)) },
+        { "largebinary", LargeBinaryType.Default },
+        { "largestring", LargeStringType.Default },
+        { "largelistview_of_string", new LargeListViewType(new Field("item", StringType.Default, true)) },
+        { "fixedsizelist_of_int64_2", new FixedSizeListType(Int64Type.Default, 2) },
+        { "extension_bool8", Bool8Type.Default },
+        { "dictionary_int32_string", new DictionaryType(Int32Type.Default, StringType.Default, false) },
+        { "runendencoded_int32_int64", new RunEndEncodedType(Int32Type.Default, Int64Type.Default) },
+        {
+            "union_sparse_int64_string",
+            new UnionType(
+                [new Field("a", Int64Type.Default, true), new Field("b", StringType.Default, true)],
+                [0, 1], UnionMode.Sparse)
         },
     };
 
@@ -90,6 +146,15 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             // that creates fine but fails on insert must still be refused, or the guard would let a
             // write through that fails Rust-side with no pz context, which is exactly what this task
             // exists to prevent.
+            //
+            // For every REFUSED candidate observed so far, ProbeInsertAsync's own internal
+            // CreateTableAsync call fails first, with the identical message CREATE alone produces --
+            // InsertAsync and the NullArrayFor-built value are never reached for those. So for the
+            // negative set, "create and insert agree" is the same create-time schema check observed
+            // twice, not two independent signals; it does NOT prove delta-rs's write-time conversion
+            // itself refuses these types, only that the type never gets that far. For every ACCEPTED
+            // candidate, by contrast, InsertAsync genuinely runs to completion and DOES exercise the
+            // separate write path -- that half of the agreement is real, independent evidence.
             if (createAccepted != insertAccepted)
             {
                 output.WriteLine(
@@ -116,8 +181,11 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
                 default));
             return true;
         }
-        catch (Exception ex)
+        catch (DeltaLakeException ex)
         {
+            // Narrowed to delta-rs's own exception type deliberately: a candidate with no matching
+            // SingleValueArrayFor case throws NotSupportedException, which must fail the test loudly as
+            // a harness gap, not get silently logged and counted as "rejected by delta-rs."
             output.WriteLine($"{label}: create rejected by delta-rs — {ex.GetType().Name}: {ex.Message}");
             return false;
         }
@@ -136,28 +204,35 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
 
                 var k = new Int64Array.Builder();
                 k.Append(1);
-                var v = NullArrayFor(schema.FieldsList[1].DataType);
+                var v = SingleValueArrayFor(schema.FieldsList[1].DataType);
                 var batch = new RecordBatch(schema, [k.Build(), v], 1);
 
                 await table.InsertAsync([batch], schema, new InsertOptions { SaveMode = SaveMode.Append }, default);
             });
             return true;
         }
-        catch (Exception ex)
+        catch (DeltaLakeException ex)
         {
             output.WriteLine($"{label}: insert rejected by delta-rs — {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
 
-    // The probe only needs a well-formed, single all-null value of the candidate type -- it is
-    // exercising schema/type acceptance during the write path, not value conversion. Each arm uses the
-    // real Apache.Arrow builder for that leaf type; List/Map append a null entry directly (their
-    // builders own constructing an empty inner values array of the declared value type), and Struct --
-    // which Apache.Arrow gives no builder for -- is assembled from its children directly, recursing so
-    // nested candidates are covered the same way as top-level ones.
-    private static IArrowArray NullArrayFor(IArrowType type) => type switch
+    // Builds one well-formed row of the candidate type -- exercising schema/type acceptance during the
+    // write path, not value conversion. Most arms build an all-null value via the real Apache.Arrow
+    // builder for that leaf type. A few types carry no meaningful "null" shortcut and get the smallest
+    // legal NON-null value instead (Dictionary: one dictionary entry plus one index pointing at it;
+    // RunEndEncoded: one run of length one; Union: one child slot selected) -- noted per-arm below.
+    // List/Map append a null entry directly (their builders own constructing an empty inner values
+    // array of the declared value/key/value type); Struct -- which Apache.Arrow gives no builder for --
+    // is assembled from its children directly, recursing so nested candidates are covered the same way
+    // as top-level ones. The Dictionary/RunEndEncoded/Union arms hardcode child types matching this
+    // file's own single candidate of each kind (int32-indexed dictionary of strings; int32 run-ends
+    // over int64 values; a two-field int64/string sparse union) -- they are not general-purpose
+    // builders for arbitrary Dictionary/RunEndEncoded/Union shapes.
+    private static IArrowArray SingleValueArrayFor(IArrowType type) => type switch
     {
+        NullType => new NullArray(1),
         BooleanType => new BooleanArray.Builder().AppendNull().Build(),
         Int8Type => new Int8Array.Builder().AppendNull().Build(),
         Int16Type => new Int16Array.Builder().AppendNull().Build(),
@@ -167,6 +242,7 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
         UInt16Type => new UInt16Array.Builder().AppendNull().Build(),
         UInt32Type => new UInt32Array.Builder().AppendNull().Build(),
         UInt64Type => new UInt64Array.Builder().AppendNull().Build(),
+        HalfFloatType => new HalfFloatArray.Builder().AppendNull().Build(),
         FloatType => new FloatArray.Builder().AppendNull().Build(),
         DoubleType => new DoubleArray.Builder().AppendNull().Build(),
         StringType => new StringArray.Builder().AppendNull().Build(),
@@ -174,25 +250,87 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
         Date32Type => new Date32Array.Builder().AppendNull().Build(),
         Date64Type => new Date64Array.Builder().AppendNull().Build(),
         TimestampType ts => new TimestampArray.Builder(ts).AppendNull().Build(),
-        Decimal128Type d => new Decimal128Array.Builder(d).AppendNull().Build(),
+        // Decimal128/256/32/64Type all derive from FixedSizeBinaryType (confirmed via reflection:
+        // Decimal128Type.BaseType == FixedSizeBinaryType) -- these four arms must come BEFORE the
+        // bare FixedSizeBinaryType arm below, or that arm's pattern silently swallows all of them and
+        // the compiler flags the decimal arms as unreachable.
+        Decimal128Type d128 => new Decimal128Array.Builder(d128).AppendNull().Build(),
+        Decimal256Type d256 => new Decimal256Array.Builder(d256).AppendNull().Build(),
+        Decimal32Type d32 => new Decimal32Array.Builder(d32).AppendNull().Build(),
+        Decimal64Type d64 => new Decimal64Array.Builder(d64).AppendNull().Build(),
+        FixedSizeBinaryType fsb => BuildNullFixedSizeBinary(fsb),
         Time32Type t32 => new Time32Array.Builder(t32).AppendNull().Build(),
         Time64Type t64 => new Time64Array.Builder(t64).AppendNull().Build(),
         DurationType dur => new DurationArray.Builder(dur).AppendNull().Build(),
         IntervalType { Unit: IntervalUnit.YearMonth } => new YearMonthIntervalArray.Builder().AppendNull().Build(),
+        BinaryViewType => new BinaryViewArray.Builder().AppendNull().Build(),
+        StringViewType => new StringViewArray.Builder().AppendNull().Build(),
+        LargeBinaryType => new LargeBinaryArray.Builder().AppendNull().Build(),
+        LargeStringType => new LargeStringArray.Builder().AppendNull().Build(),
         ListType lt => new ListArray.Builder(lt.ValueDataType).AppendNull().Build(),
+        ListViewType lvt => new ListViewArray.Builder(lvt.ValueDataType).AppendNull().Build(),
+        LargeListType llt => new LargeListArray.Builder(llt.ValueDataType).AppendNull().Build(),
+        LargeListViewType llvt => new LargeListViewArray.Builder(llvt.ValueDataType).AppendNull().Build(),
+        FixedSizeListType fsl => new FixedSizeListArray.Builder(fsl.ValueDataType, fsl.ListSize).AppendNull().Build(),
         MapType mt => new MapArray.Builder(mt).AppendNull().Build(),
         StructType st => BuildNullStruct(st),
+        Bool8Type => new Bool8Array(Bool8Type.Default, new Int8Array.Builder().AppendNull().Build()),
+        DictionaryType dict => BuildDictionary(dict),
+        RunEndEncodedType ree => BuildRunEndEncoded(ree),
+        UnionType u => BuildSparseUnion(u),
         _ => throw new NotSupportedException(
-            $"DeltaTypeSupportTests.NullArrayFor has no case for {type.GetType().Name} ({type.Name}) -- " +
+            $"DeltaTypeSupportTests.SingleValueArrayFor has no case for {type.GetType().Name} ({type.Name}) -- " +
             "add one alongside the corresponding Candidates() entry."),
     };
 
     private static IArrowArray BuildNullStruct(StructType type)
     {
-        var children = type.Fields.Select(f => NullArrayFor(f.DataType)).ToArray();
+        var children = type.Fields.Select(f => SingleValueArrayFor(f.DataType)).ToArray();
         var validity = new ArrowBuffer.BitmapBuilder();
         validity.Append(false);
         return new StructArray(type, length: 1, children, validity.Build(), nullCount: 1);
+    }
+
+    private static IArrowArray BuildNullFixedSizeBinary(FixedSizeBinaryType type)
+    {
+        var validity = new ArrowBuffer.BitmapBuilder();
+        validity.Append(false);
+        var data = new ArrayData(type, length: 1, nullCount: 1, offset: 0,
+            buffers: [validity.Build(), new ArrowBuffer(new byte[type.ByteWidth])]);
+        return new FixedSizeBinaryArray(data);
+    }
+
+    // Dictionary encoding always carries a real index into a real dictionary -- there is no "all null"
+    // shortcut the way a plain nullable column has. This builds the smallest legal non-null
+    // dictionary-encoded value: one dictionary entry ("x"), one index (0) pointing at it. Hardcodes
+    // Int32/String because that is this file's one Dictionary candidate's index/value type.
+    private static IArrowArray BuildDictionary(DictionaryType type)
+    {
+        var indices = new Int32Array.Builder().Append(0).Build();
+        var dictionaryValues = new StringArray.Builder().Append("x").Build();
+        return new DictionaryArray(type, indices, dictionaryValues);
+    }
+
+    // One run of length one over one (null) value -- the smallest legal run-end-encoded array.
+    // Hardcodes Int32/Int64 because that is this file's one RunEndEncoded candidate's run-end/value type.
+    private static IArrowArray BuildRunEndEncoded(RunEndEncodedType type)
+    {
+        var runEnds = new Int32Array.Builder().Append(1).Build();
+        var values = new Int64Array.Builder().AppendNull().Build();
+        return new RunEndEncodedArray(runEnds, values);
+    }
+
+    // A one-row sparse union selecting child 0. Hardcodes an Int64/String two-field shape because that
+    // is this file's one Union candidate's field layout.
+    private static IArrowArray BuildSparseUnion(UnionType type)
+    {
+        var children = new IArrowArray[]
+        {
+            new Int64Array.Builder().AppendNull().Build(),
+            new StringArray.Builder().AppendNull().Build(),
+        };
+        var typeIds = new ArrowBuffer.Builder<byte>().Append(0).Build();
+        return new SparseUnionArray(type, 1, children, typeIds, nullCount: 0);
     }
 
     [Fact]

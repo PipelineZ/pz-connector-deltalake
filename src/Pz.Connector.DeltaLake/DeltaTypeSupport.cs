@@ -8,16 +8,38 @@ namespace Pz.Connector.DeltaLake;
 /// exists so a type Delta cannot represent fails at BeginWriteAsync with a named column, instead of
 /// surfacing as a Rust-side error partway through a write with no pz context attached.
 ///
-/// The set below is OBSERVED: DeltaTypeSupportTests writes each candidate through a real delta-rs
+/// The set below is OBSERVED, over every constructible <see cref="ArrowTypeId"/> value, not a
+/// convenient subset of them: DeltaTypeSupportTests writes each candidate through a real delta-rs
 /// create AND a real delta-rs insert and asserts this predicate agrees with the stricter of the two.
-/// When delta-rs gains a type, the test fails and this list changes — never the other way round.</summary>
+/// When delta-rs gains a type, the test fails and this list changes — never the other way round.
+///
+/// <see cref="ArrowTypeId.List"/>/<see cref="ArrowTypeId.Struct"/>/<see cref="ArrowTypeId.Map"/> are
+/// the only containers whose element type is recursed into — that recursion is itself observed
+/// (DeltaTypeSupportTests carries a nested-unwritable and a nested-ordinary candidate, two levels deep
+/// for List, and separately for the Map key and value sides). LargeList/ListView/LargeListView were
+/// each observed writable with an ordinary inner type but were NOT probed with an unwritable inner type,
+/// so their element type is deliberately NOT recursed into below — DuckDB's Arrow export does not
+/// produce any of the three (LIST becomes <see cref="ArrowTypeId.List"/>, ARRAY becomes <see
+/// cref="ArrowTypeId.FixedSizeList"/>), so this is an accepted, documented gap rather than a silent
+/// one; closing it needs its own observed candidates first.</summary>
 internal static class DeltaTypeSupport
 {
     public static bool IsWritable(IArrowType type) => type.TypeId switch
     {
-        // Delta's physical types have no interval or duration; a time-of-day column has no Delta
-        // counterpart either. Everything else in the candidate set round-trips.
-        ArrowTypeId.Interval or ArrowTypeId.Duration or ArrowTypeId.Time32 or ArrowTypeId.Time64 => false,
+        // No Delta physical type exists for these at all: Null, HalfFloat, Interval, Duration,
+        // Time32/64, Decimal32/64/256, RunEndEncoded, Union all fail at CREATE with delta-rs's own
+        // "Invalid data type for Delta Lake: <Type>" schema error.
+        ArrowTypeId.Null or ArrowTypeId.HalfFloat or ArrowTypeId.Interval or ArrowTypeId.Duration or
+            ArrowTypeId.Time32 or ArrowTypeId.Time64 or ArrowTypeId.Decimal32 or ArrowTypeId.Decimal64 or
+            ArrowTypeId.Decimal256 or ArrowTypeId.RunEndEncoded or ArrowTypeId.Union => false,
+        // FixedSizeList is the one candidate where CREATE and INSERT disagreed: CREATE accepts a
+        // fixed_size_list column, but a real INSERT through DeltaLake.Net 0.33.0 fails --
+        // "column types must match schema types, expected List(Int64, field: 'element') but found
+        // List(Int64)" -- because the FFI marshaling reports the array back as a schema-mismatched
+        // plain List rather than the FixedSizeList the table was created with. Since this guard
+        // protects the write path (BeginWriteAsync), not the create path, the stricter (insert)
+        // observation governs: refused, regardless of element or list-size.
+        ArrowTypeId.FixedSizeList => false,
         ArrowTypeId.Struct => ((StructType)type).Fields.All(f => IsWritable(f.DataType)),
         ArrowTypeId.List => IsWritable(((ListType)type).ValueDataType),
         ArrowTypeId.Map => IsWritable(((MapType)type).KeyField.DataType) &&
