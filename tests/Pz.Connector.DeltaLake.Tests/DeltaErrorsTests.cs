@@ -25,6 +25,34 @@ public class DeltaErrorsTests
     }
 
     [Fact]
+    public void Translate_maps_a_missing_non_nullable_column_to_PZDL0301_naming_nullability()
+    {
+        // Reconcile now refuses a NOT NULL column the write ADDS before any session exists, so this
+        // mapping is a backstop for the one window it cannot cover: another writer changing the table
+        // between BeginWriteAsync's schema read and this write's commit. Unreachable from an
+        // integration test by construction, which is why it is pinned here instead.
+        var raw = new DeltaLakeException(
+            "Execution error: Non-nullable column 'note' is missing from the physical schema", 1);
+        var ex = DeltaErrors.Translate(raw, "merge of output 'orders'", ["id"]);
+
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public void Translate_leaves_a_missing_non_nullable_column_on_a_READ_to_the_read_code()
+    {
+        // The same delta-rs message reaches a READ of a table some earlier write already broke this
+        // way, and "would add a column" is not true of a read.
+        var raw = new DeltaLakeException(
+            "Execution error: Non-nullable column 'note' is missing from the physical schema", 1);
+        var ex = DeltaErrors.Translate(raw, "read of dataset 'orders'", []);
+
+        Assert.Contains(DeltaErrors.TableUnreadable, ex.Message);
+    }
+
+    [Fact]
     public void Transient_marks_the_exception_so_the_engine_can_retry_it()
     {
         var ex = DeltaErrors.Transient(DeltaErrors.CommitConflict, "another writer committed first", "retry the run");

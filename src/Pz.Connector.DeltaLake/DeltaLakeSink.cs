@@ -358,7 +358,26 @@ internal sealed class DeltaLakeSink : ISink
     /// with a row-data preview, after the table exists and after any earlier flushed generation has
     /// already committed. Under the default schema_policy both are refused; "evolve" is the opt-in that
     /// lets the write's own shape govern, and even it cannot wave through a missing non-nullable
-    /// column, because delta-rs itself will not.</summary>
+    /// column, because delta-rs itself will not.
+    ///
+    /// The MIRROR of that rule is enforced here too, and it is the worst failure shape this connector
+    /// has produced: a column the write ADDS that is declared NOT NULL. Measured against the shipped
+    /// library on a table that already has rows — an append COMMITS it and says nothing, and every
+    /// later read of that table fails with "Non-nullable column 'x' is missing from the physical
+    /// schema". The damage is silent at write time and surfaces afterwards, in another process
+    /// belonging to another person, where no error of ours can reach them. Refusing here, for every
+    /// strategy, is the only point at which it can be stopped.
+    ///
+    /// It is refused UNCONDITIONALLY, including on a table that holds no rows, where the same addition
+    /// does succeed. That is a deliberate trade, and the alternative was measured rather than assumed:
+    /// a row count is cheap (delta-rs answers select count(*) from the log's own statistics — 11 ms on
+    /// two million rows, 1 ms on an empty table), so cost is not what rules it out. What rules it out is
+    /// that it cannot be made race-free. Delta is a multi-writer format — this connector classifies a
+    /// commit conflict as transient precisely because it expects other writers — so a count taken here
+    /// and acted on at commit is a check-then-act whose lost race produces exactly the unreadable table
+    /// this rule exists to prevent. A false refusal costs one config edit; a wrong "it looked empty"
+    /// costs a table nobody can read. Neither file-listing API is available as an alternative: both
+    /// ITable.FilesAsync() and ITable.FileUrisAsync() abort the process on a table that has files.</summary>
     private static void Reconcile(
         Schema incoming, Schema table, IReadOnlyList<string>? tablePartitions,
         DeltaWriteOptions options, OutputSpec spec)
@@ -386,6 +405,15 @@ internal sealed class DeltaLakeSink : ISink
                 if (!evolving)
                 {
                     problems.Add($"column '{field.Name}' is not in the table");
+                }
+                else if (!field.IsNullable)
+                {
+                    problems.Add(
+                        $"column '{field.Name}' is not in the table and is declared NOT NULL, so it cannot " +
+                        "be added to one that already exists — Delta has no value to give it in rows " +
+                        "committed before it existed. It is refused even on a table that happens to hold " +
+                        "no rows right now, because whether it does cannot be established without racing " +
+                        "another writer");
                 }
 
                 continue;
@@ -424,9 +452,10 @@ internal sealed class DeltaLakeSink : ISink
             throw DeltaErrors.Fail(DeltaErrors.SchemaMismatch,
                 $"output '{spec.Output}': {string.Join("; ", problems)}",
                 $"cast or select the columns in the pipeline SQL to match the table; set schema_policy: " +
-                $"{EvolvingSchemaPolicy} to let the write add a column the table lacks or leave a nullable " +
-                "one null; a partitioning change needs a new table, because Delta cannot repartition one " +
-                "in place");
+                $"{EvolvingSchemaPolicy} to let the write add a NULLABLE column the table lacks or leave a " +
+                "nullable one null; a column the write ADDS must be nullable, so declare it nullable in " +
+                "the pipeline SQL or create a new table with the full schema and backfill into it; a " +
+                "partitioning change needs a new table, because Delta cannot repartition one in place");
         }
     }
 

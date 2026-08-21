@@ -115,9 +115,11 @@ internal static class DeltaErrors
     /// <summary>delta-rs's wording when a column the table's schema declares NOT NULL is absent from the
     /// data files already committed. Measured: it is what a write gets for ADDING a non-nullable column
     /// to a table that already has rows — those rows have no value for it, and none can be invented.
-    /// Adding one to an EMPTY table succeeds, which is why this is mapped here rather than refused
-    /// pre-flight: a pre-flight rule would have to guess at the row count and would cost the empty
-    /// case.</summary>
+    /// DeltaLakeSink's Reconcile now refuses this before a session exists, for every strategy, so this
+    /// mapping is a BACKSTOP rather than the main guard — it covers the one window Reconcile cannot: a
+    /// concurrent writer changing the table between the schema read at BeginWriteAsync and this write's
+    /// commit. That makes it unreachable from an integration test, so DeltaErrorsTests pins it
+    /// directly.</summary>
     private const string MissingPhysicalColumnMarker = "missing from the physical schema";
 
     /// <summary>DataFusion's wording for a statement it could not parse. In a merge that means the

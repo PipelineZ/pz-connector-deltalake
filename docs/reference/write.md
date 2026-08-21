@@ -86,19 +86,7 @@ target table. A null or NaN key already sitting in the table that no incoming ro
 its reach. Reading the whole target on every merge would cost more than the operation the check
 protects, so it is not done.
 
-### `schema_policy: evolve` on a merge
-
-`evolve` means the same thing on `merge` as on `append`: a column the pipeline produces that the table
-does not have is **added** to the table, and the rows already there read null in it.
-
-Under any other policy — including the default `fail_on_change` — a column the table lacks is refused
-with `PZDL0301`.
-
-One limit: a column added to a table that **already has rows** must be nullable, because those rows
-have no value for it and Delta cannot invent one. Adding a `NOT NULL` column to a table with rows is
-reported as `PZDL0301`; adding one to an empty table works.
-
-### Values a partition column cannot carry
+## Values a partition column cannot carry
 
 Independent of strategy — `append`, `replace` and `merge` alike — `PZDL0406` reports a partition value
 this connector will not write:
@@ -119,6 +107,31 @@ Every offending column is named in one message; the messages name columns and ne
 The guard's authority is the table's own partition columns, not `partition_by`. `partition_by` is
 honoured only when the table is created, so a run against a table an earlier run partitioned need not
 declare it.
+
+## `schema_policy: evolve`
+
+`evolve` means the same thing on every strategy — `append`, `replace` and `merge` alike: a column the
+pipeline produces that the table does not have is **added** to the table, and the rows already there
+read null in it.
+
+Under any other policy — including the default `fail_on_change` — a column the table lacks is refused
+with `PZDL0301`.
+
+**A column the write adds must be nullable.** Delta has no value to give it in rows committed before it
+existed, and none can be invented. A `NOT NULL` addition is refused with `PZDL0301`, before anything is
+written, on every strategy. The two workarounds are:
+
+- declare the column nullable in the pipeline SQL (`cast(x as varchar)` on a `null` branch, a
+  `try_cast`, or simply not marking it `not null`); or
+- create a new table with the full schema and backfill into it.
+
+The refusal stands **even when the table currently holds no rows**, where the addition would in fact
+succeed. That is deliberate. Establishing emptiness means counting rows and then acting on the answer,
+and Delta is a multi-writer format — another writer can add rows in between. Losing that race produces
+exactly the outcome the rule exists to prevent, and it is a bad one: on `append` the write **commits
+successfully and says nothing**, and every later read of the table fails with `Non-nullable column 'x'
+is missing from the physical schema`. A false refusal costs one config edit; a wrong "it looked empty"
+costs a table nobody can read.
 
 ## What a merge costs
 

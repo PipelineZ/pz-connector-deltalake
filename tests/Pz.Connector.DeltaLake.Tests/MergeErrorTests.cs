@@ -571,31 +571,97 @@ public class MergeErrorTests
         Assert.Contains("archived", ex.Message);
     }
 
-    [Fact]
-    public async Task A_merge_that_adds_a_not_null_column_to_a_table_with_rows_is_reported_with_a_code()
+    [Theory]
+    [InlineData("append")]
+    [InlineData("replace")]
+    [InlineData("merge")]
+    public async Task Adding_a_not_null_column_under_evolve_is_refused_on_every_strategy(string strategy)
     {
-        // Delta cannot invent a value for rows committed before the column existed, so a NOT NULL
-        // addition is impossible on a table that already has rows — measured; on an EMPTY table it
-        // succeeds, which is why this is mapped from the failure rather than refused pre-flight.
-        // Untranslated it reads "Non-nullable column 'note' is missing from the physical schema".
-        var dir = TempDir("pz-delta-notnulladd");
+        // The worst failure shape this connector has produced, and the reason the rule is pre-flight
+        // rather than mapped from a write failure. Measured against the shipped library: on 'append',
+        // adding a NOT NULL column to a table that already has rows COMMITS successfully and says
+        // nothing — and every later read of that table fails with "Non-nullable column 'note' is
+        // missing from the physical schema". Silent at write time, loud afterwards, in another process
+        // belonging to another person, where no error of ours can reach them. Delta has no value to give
+        // the column in rows committed before it existed, and none can be invented.
+        var dir = TempDir("pz-delta-notnulladd-" + strategy);
         await using var sink = await OpenSink(dir);
-        await using (var seed = await sink.BeginWriteAsync(
-            new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>()),
-            DeltaTestTable.Schema, default))
+        await SeedAsync(sink);
+
+        var spec = Spec(strategy) with { SchemaPolicy = "evolve" };
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, WithRequiredNote, default));
+
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("'note'", ex.Message);
+        Assert.Contains("NOT NULL", ex.Message);
+
+        // Both real workarounds are named, and the refusal says plainly that it stands even on a table
+        // that holds no rows — a user who reads "cannot be added" and then empties the table must not
+        // be left thinking that will help.
+        Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("new table", ex.Message);
+        Assert.Contains("no rows right now", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Theory]
+    [InlineData("append")]
+    [InlineData("replace")]
+    [InlineData("merge")]
+    public async Task Adding_a_nullable_column_under_evolve_still_evolves_on_every_strategy(string strategy)
+    {
+        // The discriminating control. The rule refuses one thing only — a NOT NULL addition — and must
+        // leave ordinary schema evolution working on every strategy, which is what a user writing
+        // 'evolve' asked for.
+        var dir = TempDir("pz-delta-nullableadd-" + strategy);
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        var spec = Spec(strategy) with { SchemaPolicy = "evolve" };
+        await using (var s = await sink.BeginWriteAsync(spec, WithArchived, default))
         {
-            await seed.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 1.0)]), default);
-            await seed.CommitAsync(default);
+            await s.WriteBatchAsync(ArchivedRows([(1L, "2026-01-01", 9.0, "kept")]), default);
+            await s.CommitAsync(default);
         }
 
-        var spec = Merge(["id"]) with { SchemaPolicy = "evolve" };
-        await using var s = await sink.BeginWriteAsync(spec, WithRequiredNote, default);
-        await s.WriteBatchAsync(RequiredNoteRows(), default);
+        var location = Path.Combine(dir, "orders");
+        Assert.Contains("archived", await DeltaReader.ColumnsAsync(location));
 
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
-        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
-        Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.False(ex.IsTransient);
+        // Contains, not Single: 'append' leaves the seed row beside the new one while 'replace' and
+        // 'merge' leave one. What every strategy must agree on is that the added column carries its
+        // value — a row count alone would pass even if the column had been dropped.
+        Assert.Contains(await ArchivedReadAsync(location), r => r.Id == 1 && r.Archived == "kept");
+    }
+
+    [Fact]
+    public async Task Every_not_null_column_the_write_adds_is_named_in_one_refusal()
+    {
+        // Aggregate, never fail-one-at-a-time: Reconcile already collects its problems, and the rule
+        // joins that collection rather than short-circuiting it.
+        var dir = TempDir("pz-delta-notnulladd-many");
+        await using var sink = await OpenSink(dir);
+        await SeedAsync(sink);
+
+        var spec = Spec("append") with { SchemaPolicy = "evolve" };
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, WithTwoRequired, default));
+        Assert.Contains("'note'", ex.Message);
+        Assert.Contains("'region'", ex.Message);
+    }
+
+    private static OutputSpec Spec(string strategy) =>
+        strategy == "merge"
+            ? Merge(["id"])
+            : new OutputSpec("lake", "orders", strategy, "fail_on_change", new Dictionary<string, object?>());
+
+    private static async Task SeedAsync(ISink sink)
+    {
+        await using var seed = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>()),
+            DeltaTestTable.Schema, default);
+        await seed.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 1.0)]), default);
+        await seed.CommitAsync(default);
     }
 
     [Fact]
@@ -707,6 +773,15 @@ public class MergeErrorTests
         .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
         .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
         .Field(f => f.Name("note").DataType(StringType.Default).Nullable(false))
+        .Build();
+
+    /// <summary>Two NOT NULL additions at once, so an aggregate refusal has more than one to name.</summary>
+    private static readonly Schema WithTwoRequired = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+        .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
+        .Field(f => f.Name("note").DataType(StringType.Default).Nullable(false))
+        .Field(f => f.Name("region").DataType(StringType.Default).Nullable(false))
         .Build();
 
     private static RecordBatch RequiredNoteRows() =>
