@@ -1,5 +1,6 @@
 using Apache.Arrow;
 using Apache.Arrow.Types;
+using DeltaLake.Table;
 using Pz.Connectors.Abstractions;
 using Xunit;
 
@@ -233,6 +234,31 @@ public class MergeErrorTests
     }
 
     [Fact]
+    public async Task A_predicate_the_lexical_guard_admits_but_the_parser_rejects_points_at_the_predicate()
+    {
+        // The allowlist in DeltaMergeSql is a lexical scan, not a parser, so a predicate built entirely
+        // from permitted tokens can still be nonsense. When DataFusion says so, the next step has to
+        // name the one fragment of the statement this connector did not write — the generic write
+        // fallback tells the user to check the protocol version and the schema, neither of which has
+        // anything to do with a statement that did not parse.
+        var dir = TempDir("pz-delta-parsefail");
+        await DeltaTestTable.CreateLocalAsync(dir, rows: 2);
+        await using var sink = await OpenSink(dir);
+
+        await using var s = await sink.BeginWriteAsync(
+            Merge(["id"], ("merge_predicate", "target.id = 1 IN ()")), DeltaTestTable.Schema, default);
+        await s.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 9.0)]), default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+        Assert.Contains("merge_predicate", ex.Message);
+        Assert.DoesNotContain("protocol version", ex.Message);
+
+        // The generated statement is not a diagnostic a user can act on and carries partition literals.
+        Assert.DoesNotContain("WHEN MATCHED", ex.Message);
+    }
+
+    [Fact]
     public async Task A_null_merge_key_is_refused_rather_than_silently_duplicating_a_row()
     {
         // Measured against real delta-rs: the ON clause is target.k = source.k, equality against a null
@@ -378,6 +404,36 @@ public class MergeErrorTests
         Assert.Contains("'dt'", ex.Message);
     }
 
+    [Theory]
+    [InlineData("view")]
+    [InlineData("large")]
+    public async Task An_empty_partition_value_is_refused_in_every_string_encoding(string encoding)
+    {
+        // The guard claims to cover all six string and binary encodings, and the two above only reach
+        // two of them. The route to the others is the one the guard's own doc comment describes: which
+        // encoding a batch arrives in depends on the plan that produced it, NOT on the column's Delta
+        // type — pz's hub is DuckDB, whose Arrow export produces string-view columns. So the SCHEMA
+        // still says utf8, which is what Reconcile compares and what keeps the write legal, while the
+        // ARRAY is a StringViewArray or a LargeStringArray. Measured: Apache.Arrow builds that batch.
+        var dir = TempDir("pz-delta-emptyenc-" + encoding);
+        await using var sink = await OpenSink(dir);
+        var spec = new OutputSpec("lake", "orders", "append", "fail_on_change",
+            new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } });
+
+        await using var s = await sink.BeginWriteAsync(spec, NullableDt, default);
+
+        IArrowArray dt = encoding == "view"
+            ? new StringViewArray.Builder().Append(string.Empty).Build()
+            : new LargeStringArray.Builder().Append(string.Empty).Build();
+        var batch = new RecordBatch(NullableDt,
+            [new Int64Array.Builder().Append(1L).Build(), dt, new DoubleArray.Builder().Append(1.0).Build()], 1);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await s.WriteBatchAsync(batch, default));
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, ex.Message);
+        Assert.Contains("'dt'", ex.Message);
+    }
+
     [Fact]
     public async Task An_empty_value_in_an_ordinary_column_is_left_alone()
     {
@@ -451,6 +507,134 @@ public class MergeErrorTests
         Assert.Contains("MERGE INTO target", typed.LastMergeSql);
     }
 
+    [Fact]
+    public async Task Merge_under_evolve_widens_the_table_rather_than_dropping_the_column()
+    {
+        // The silent one this fix round exists for. Measured against the shipped library: delta-rs
+        // ACCEPTS a merge statement naming a column the table does not have, commits it, updates and
+        // inserts every row correctly — and DROPS the column. Green run, right row counts, missing data.
+        // The same write on 'append' widens the table, so the two strategies disagreed about what
+        // schema_policy: evolve means.
+        var dir = TempDir("pz-delta-mergeevolve");
+        await using var sink = await OpenSink(dir);
+
+        await using (var seed = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>()),
+            DeltaTestTable.Schema, default))
+        {
+            await seed.WriteBatchAsync(
+                DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 1.0), (2L, "2026-01-02", 2.0)]), default);
+            await seed.CommitAsync(default);
+        }
+
+        var spec = Merge(["id"]) with { SchemaPolicy = "evolve" };
+        await using (var s = await sink.BeginWriteAsync(spec, WithArchived, default))
+        {
+            await s.WriteBatchAsync(
+                ArchivedRows([(1L, "2026-01-01", 9.0, "kept"), (3L, "2026-01-03", 3.0, "added")]), default);
+            await s.CommitAsync(default);
+        }
+
+        var location = Path.Combine(dir, "orders");
+
+        // The column exists — a row count alone would read 3 whether or not it survived.
+        Assert.Contains("archived", await DeltaReader.ColumnsAsync(location));
+
+        var rows = await ArchivedReadAsync(location);
+        Assert.Equal(3, rows.Count);
+        Assert.Equal("kept", rows.Single(r => r.Id == 1).Archived);
+        Assert.Equal("added", rows.Single(r => r.Id == 3).Archived);
+
+        // The row that predates the column reads null in it, which is the only honest value for it.
+        Assert.Null(rows.Single(r => r.Id == 2).Archived);
+    }
+
+    [Fact]
+    public async Task Merge_without_evolve_still_refuses_a_column_the_table_lacks()
+    {
+        // The discriminating control: widening happens only because the user asked for it. Under the
+        // default policy the refusal — and the advice to set schema_policy: evolve — must stand, and
+        // that advice is now true for merge as well as for append.
+        var dir = TempDir("pz-delta-mergenoevolve");
+        await using var sink = await OpenSink(dir);
+        await using (var seed = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>()),
+            DeltaTestTable.Schema, default))
+        {
+            await seed.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 1.0)]), default);
+            await seed.CommitAsync(default);
+        }
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Merge(["id"]), WithArchived, default));
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("archived", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_merge_that_adds_a_not_null_column_to_a_table_with_rows_is_reported_with_a_code()
+    {
+        // Delta cannot invent a value for rows committed before the column existed, so a NOT NULL
+        // addition is impossible on a table that already has rows — measured; on an EMPTY table it
+        // succeeds, which is why this is mapped from the failure rather than refused pre-flight.
+        // Untranslated it reads "Non-nullable column 'note' is missing from the physical schema".
+        var dir = TempDir("pz-delta-notnulladd");
+        await using var sink = await OpenSink(dir);
+        await using (var seed = await sink.BeginWriteAsync(
+            new OutputSpec("lake", "orders", "append", "fail_on_change", new Dictionary<string, object?>()),
+            DeltaTestTable.Schema, default))
+        {
+            await seed.WriteBatchAsync(DeltaTestTable.RowsWithAmounts([(1L, "2026-01-01", 1.0)]), default);
+            await seed.CommitAsync(default);
+        }
+
+        var spec = Merge(["id"]) with { SchemaPolicy = "evolve" };
+        await using var s = await sink.BeginWriteAsync(spec, WithRequiredNote, default);
+        await s.WriteBatchAsync(RequiredNoteRows(), default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
+        Assert.Contains(DeltaErrors.SchemaMismatch, ex.Message);
+        Assert.Contains("nullable", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task A_nan_merge_key_is_refused_rather_than_silently_duplicating_a_row()
+    {
+        // NaN never equals itself, so target.k = source.k is false for it and WHEN NOT MATCHED fires.
+        // Measured through the raw library: three identical merge passes of two rows, one keyed NaN,
+        // leave FOUR rows — one new duplicate per run, forever, on a merge that reports success.
+        var dir = TempDir("pz-delta-nankey");
+        await using var sink = await OpenSink(dir);
+
+        await using var s = await sink.BeginWriteAsync(Merge(["rate"]), RateKeyed, default);
+        await s.WriteBatchAsync(RateRows(double.NaN, 1.5), default);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await s.CommitAsync(default));
+        Assert.Contains(DeltaErrors.UnmatchableMergeKey, ex.Message);
+        Assert.Contains("'rate'", ex.Message);
+        Assert.Contains("NaN", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task A_negative_zero_merge_key_is_allowed_because_it_matches()
+    {
+        // The discriminating control for the NaN check. -0.0 = 0.0 is TRUE, so such a row matches and
+        // updates in place — measured, three identical passes leave two rows. Refusing it would refuse
+        // a key that works.
+        var dir = TempDir("pz-delta-negzero");
+        await using var sink = await OpenSink(dir);
+        for (var pass = 0; pass < 2; pass++)
+        {
+            await using var s = await sink.BeginWriteAsync(Merge(["rate"]), RateKeyed, default);
+            await s.WriteBatchAsync(RateRows(-0.0, 1.5), default);
+            await s.CommitAsync(default);
+        }
+
+        Assert.Equal(2, await DeltaReader.RowCountAsync(Path.Combine(dir, "orders")));
+    }
+
     /// <summary>A table one nullable column wider than <see cref="DeltaTestTable.Schema"/>: the only
     /// shape in which the two sides of a merge have different columns, and therefore the only one that
     /// can tell a target-side name from a source-side one.</summary>
@@ -476,6 +660,82 @@ public class MergeErrorTests
         }
 
         return new RecordBatch(WithArchived, [id.Build(), dt.Build(), amt.Build(), archived.Build()], rows.Count);
+    }
+
+    /// <summary>Reads the wide table back including the column a merge under 'evolve' added. The shaped
+    /// reader next door carries three columns and cannot see a fourth, which is exactly the blind spot
+    /// that let a dropped column look like a successful merge.</summary>
+    private static Task<IReadOnlyList<(long Id, string? Archived)>> ArchivedReadAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(
+                new TableOptions { TableLocation = location }, default);
+            try
+            {
+                var rows = new List<(long, string?)>();
+                var query = new SelectQuery("select id, archived from tbl order by id")
+                { TableAlias = "tbl" };
+                await foreach (var batch in table.QueryAsync(query, default))
+                {
+                    using (batch)
+                    {
+                        var id = (Int64Array)batch.Column(0);
+                        for (var i = 0; i < batch.Length; i++)
+                        {
+                            rows.Add((id.GetValue(i) ?? 0,
+                                batch.Column(1).IsNull(i) ? null : DeltaReader.Text(batch.Column(1), i)));
+                        }
+                    }
+                }
+
+                return (IReadOnlyList<(long, string?)>)rows;
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
+    /// <summary>A column the write adds that is NOT nullable — impossible to add to a table that
+    /// already has rows, because those rows have no value for it.</summary>
+    private static readonly Schema WithRequiredNote = new Schema.Builder()
+        .Field(f => f.Name("id").DataType(Int64Type.Default).Nullable(false))
+        .Field(f => f.Name("dt").DataType(StringType.Default).Nullable(false))
+        .Field(f => f.Name("amt").DataType(DoubleType.Default).Nullable(true))
+        .Field(f => f.Name("note").DataType(StringType.Default).Nullable(false))
+        .Build();
+
+    private static RecordBatch RequiredNoteRows() =>
+        new(WithRequiredNote,
+            [
+                new Int64Array.Builder().Append(1L).Build(),
+                new StringArray.Builder().Append("2026-01-01").Build(),
+                new DoubleArray.Builder().Append(9.0).Build(),
+                new StringArray.Builder().Append("n").Build(),
+            ],
+            1);
+
+    /// <summary>A double-keyed table, so a key can carry NaN.</summary>
+    private static readonly Schema RateKeyed = new Schema.Builder()
+        .Field(f => f.Name("rate").DataType(DoubleType.Default).Nullable(false))
+        .Field(f => f.Name("label").DataType(StringType.Default).Nullable(true))
+        .Build();
+
+    private static RecordBatch RateRows(params double[] rates)
+    {
+        var rate = new DoubleArray.Builder();
+        var label = new StringArray.Builder();
+        foreach (var r in rates)
+        {
+            rate.Append(r);
+            label.Append("x");
+        }
+
+        return new RecordBatch(RateKeyed, [rate.Build(), label.Build()], rates.Length);
     }
 
     /// <summary>Two partition columns, so an aggregate refusal has more than one thing to name.</summary>

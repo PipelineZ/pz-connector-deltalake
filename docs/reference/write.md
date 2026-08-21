@@ -23,25 +23,80 @@ outputs:
 name must be qualified `target.` (a column of the table being written into) or `source.` (a column of
 this output), and function calls, casts, `CASE` and subqueries are refused. That is a deliberate limit
 — the predicate is interpolated into a statement handed to a SQL engine this connector does not own,
-and the vocabulary that engine accepts is not one this connector can enumerate.
+and the vocabulary that engine accepts is not one this connector can enumerate. A predicate this
+connector accepts but the SQL engine cannot parse is reported as `PZDL0107`.
+
+### `merge_predicate` turns an excluded row into a DUPLICATE, not a skip
+
+**Read this before using `merge_predicate`.** It is the sharpest edge on the merge surface, it is
+inherent to Delta's `MERGE` and not something this connector can refuse, and it is easy to read
+"narrows the merge" as "touches fewer rows".
+
+The predicate is ANDed into the `ON` clause. A row it excludes is therefore **not matched** — and an
+unmatched source row is an `INSERT`. The target row it should have updated stays exactly where it is,
+and the table ends up with two rows for one key.
+
+Worked example. Table `orders`, `keys: [id]`, `merge_predicate: "target.dt >= '2026-01-01'"`:
+
+| | `id` | `dt` | `amt` |
+|---|---|---|---|
+| in the table | 1 | `2026-03-01` | 10 |
+| in the table | 2 | `2025-11-04` | 20 |
+| incoming | 1 | `2026-03-01` | 99 |
+| incoming | 2 | `2025-11-04` | 99 |
+
+The run succeeds and reports two rows written. Afterwards:
+
+| `id` | `dt` | `amt` | |
+|---|---|---|---|
+| 1 | `2026-03-01` | 99 | updated — the predicate let it match |
+| 2 | `2025-11-04` | 20 | the original, untouched |
+| 2 | `2025-11-04` | 99 | **inserted: a second row for `id = 2`** |
+
+No error, and the row count looks right. `MergeErrorTests.A_merge_predicate_may_name_a_column_only_the_table_has`
+asserts exactly this shape — it is what proves the predicate ran.
+
+**Do this instead.** Put the same condition on the SOURCE, in the pipeline's own SQL, so the rows the
+merge must not touch never reach it:
+
+```sql
+select * from staged where dt >= '2026-01-01'
+```
+
+Use `merge_predicate` on top of that only to prune the target scan for speed — never as the only place
+the condition appears. A condition that holds for the source and the target alike (`target.dt` matching
+a filter the pipeline already applied) prunes without excluding anything, which is the safe shape.
 
 ### Values a merge key cannot carry
 
-A merge is refused, with `PZDL0405`, when a key column holds a value the join cannot match:
+A merge is refused, with `PZDL0405`, when a key column holds a value that cannot match itself, so that
+the row would be inserted a second time on every run instead of updating the row it belongs to. SQL has
+exactly two such values:
 
-- **A null in any key column.** `target.k = source.k` against a null is null, never true, so the row
-  matches nothing and is inserted a second time instead of updating the row it belongs to.
-- **An empty string in a key that is also a partition column.** Delta writes a partition value into a
-  directory name, where an empty string is indistinguishable from a null: the row reads back with null
-  in that column, and the next merge duplicates it.
+- **A null in any key column.** `target.k = source.k` against a null is null, never true.
+- **NaN in a float or double key column.** NaN never equals itself. (`-0.0` is fine and is not refused:
+  `-0.0 = 0.0` is true, so such a row matches and updates in place.)
 
 Both are refused rather than allowed to happen, because a duplicated row and a successful merge look
-identical from the outside.
+identical from the outside. An empty value in a partition column is the same hazard by a different
+route and is refused separately — see below.
 
-**Documented limit.** The null-key check reads the batches this write hands over; it does not read the
-target table. A null key already sitting in the table that no incoming row touches is outside its
-reach. Reading the whole target on every merge would cost more than the operation the check protects,
-so it is not done.
+**Documented limit.** The key check reads the batches this write hands over; it does not read the
+target table. A null or NaN key already sitting in the table that no incoming row touches is outside
+its reach. Reading the whole target on every merge would cost more than the operation the check
+protects, so it is not done.
+
+### `schema_policy: evolve` on a merge
+
+`evolve` means the same thing on `merge` as on `append`: a column the pipeline produces that the table
+does not have is **added** to the table, and the rows already there read null in it.
+
+Under any other policy — including the default `fail_on_change` — a column the table lacks is refused
+with `PZDL0301`.
+
+One limit: a column added to a table that **already has rows** must be nullable, because those rows
+have no value for it and Delta cannot invent one. Adding a `NOT NULL` column to a table with rows is
+reported as `PZDL0301`; adding one to an empty table works.
 
 ### Values a partition column cannot carry
 

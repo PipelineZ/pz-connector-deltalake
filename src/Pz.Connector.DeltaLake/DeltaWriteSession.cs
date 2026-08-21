@@ -217,13 +217,14 @@ internal sealed class DeltaWriteSession(
         }
 
         this.RefuseUnmatchableKeys();
+        var targets = await this.WidenAsync(ct).ConfigureAwait(false);
 
         // Safe to hand the buffer straight to the deriver: these are the session's own CLONES, not the
         // engine-owned batches WriteBatchAsync was called with.
         var derivation = DeltaPartitionPredicate.Derive(this.buffered, options);
         this.LastSkipReason = derivation.SkipReason;
 
-        var sql = DeltaMergeSql.Build(schema, targetColumns, options, derivation.Filters);
+        var sql = DeltaMergeSql.Build(schema, targets, options, derivation.Filters);
         this.LastMergeSql = sql;
 
         var payload = this.buffered.ToArray();
@@ -233,29 +234,98 @@ internal sealed class DeltaWriteSession(
         }
         catch (Exception ex)
         {
-            throw DeltaErrors.Translate(ex, $"merge of output '{output}'", options.Keys);
+            throw DeltaErrors.Translate(ex, $"merge of output '{output}'", options.Keys, options.MergePredicate);
         }
     }
 
-    /// <summary>Refuses a merge whose keys hold a NULL, rather than letting it report success over a
-    /// duplicated row. Measured against real delta-rs on a real table: the ON clause is
-    /// <c>target.k = source.k</c>, and SQL equality against a null is null, never true — so the incoming
-    /// row matches nothing, WHEN NOT MATCHED fires, and a row whose key is already in the table gains a
-    /// second copy. Nothing errors, and no row count looks wrong.
+    /// <summary>Widens the table to carry the columns this write adds, and answers the column list the
+    /// merge statement must resolve `target.` names against.
+    ///
+    /// A merge statement names the SOURCE's columns in its SET and INSERT clauses. Measured against the
+    /// shipped library: delta-rs ACCEPTS a statement naming a column the table does not have, commits
+    /// it, updates and inserts every row correctly — and drops the column. No error, no warning, and a
+    /// row count that looks right. The same write on 'append' widens the table. Two strategies
+    /// disagreeing about what schema_policy means is worse than either answer alone, so merge widens
+    /// too.
+    ///
+    /// The mechanism is a zero-row insert of the wider schema, which delta-rs answers with a
+    /// metadata-only commit — measured: it adds no data file, and the merge that follows then carries
+    /// the new column through. There is no schema-evolution flag on MergeAsync itself in 0.33.0, so
+    /// this is the whole of what is available.
+    ///
+    /// Reaching here with columns to add IMPLIES schema_policy: evolve. Reconcile refuses a source
+    /// column the table lacks under every other policy, before a session exists, so this method never
+    /// has to consult the policy — and must not start to without revisiting that.
+    ///
+    /// A column added to a table that ALREADY HAS ROWS must be nullable, because those rows have no
+    /// value for it. Measured: on a table with rows, a NOT NULL addition fails the merge outright, and
+    /// on an EMPTY table it succeeds — so it is not refused pre-flight, which would cost the empty case;
+    /// the failure is mapped to a coded error instead (DeltaErrors' MissingPhysicalColumnMarker).
+    ///
+    /// The widening commits before the merge does, so a merge that then fails leaves the table widened.
+    /// That is the same shape as an append's already-flushed generation, which is why this sink declares
+    /// AbortSemantics.BestEffort, and it costs nothing: the added column is nullable and every existing
+    /// row reads null in it.</summary>
+    private async Task<IReadOnlyList<string>> WidenAsync(CancellationToken ct)
+    {
+        var known = targetColumns.ToHashSet(StringComparer.Ordinal);
+        if (schema.FieldsList.All(f => known.Contains(f.Name)))
+        {
+            return targetColumns;
+        }
+
+        // Slicing a buffered batch to zero rows is how the wider schema is expressed without inventing
+        // an empty array for every Arrow type this connector accepts. The slice SHARES the parent's
+        // buffers and must never be disposed — measured: disposing it frees the parent's memory, and the
+        // parent is a batch this session still owns and still has to hand to the merge.
+        var empty = this.buffered[0].Slice(0, 0);
+        var insert = new InsertOptions { SaveMode = SaveMode.Append };
+
+        try
+        {
+            await DeltaBigStack.RunAsync(() => table.InsertAsync([empty], schema, insert, ct))
+                .ConfigureAwait(false);
+            return await DeltaBigStack.RunAsync(
+                () => Task.FromResult<IReadOnlyList<string>>(
+                    [.. table.Schema().FieldsList.Select(f => f.Name)])).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            throw DeltaErrors.Translate(ex, $"schema widening of output '{output}'", options.Keys);
+        }
+    }
+
+    /// <summary>Refuses a merge whose keys hold a value that cannot match itself, rather than letting it
+    /// report success over a duplicated row. The ON clause is <c>target.k = source.k</c>, so a key value
+    /// for which <c>k = k</c> is not true matches nothing, WHEN NOT MATCHED fires, and a row whose key is
+    /// already in the table gains a second copy. Nothing errors, and no row count looks wrong. SQL has
+    /// exactly two such values and both are checked:
+    ///
+    /// NULL, in any key column. Equality against a null is null, never true.
+    ///
+    /// NaN, in a float or double key column. NaN never equals itself. Measured against real delta-rs:
+    /// three identical merge passes of two rows, one of them keyed NaN, leave FOUR rows — one correct
+    /// row and one new duplicate per pass, forever. <c>-0.0</c> needs no handling and is deliberately
+    /// not refused: <c>-0.0 = 0.0</c> is true, so such a row matches and updates in place — measured, the
+    /// same three passes leave two rows. HalfFloat is not walked because DeltaTypeSupport refuses the
+    /// type at BeginWriteAsync, so it cannot reach a key.
     ///
     /// The other value that cannot match — an empty partition value, which Delta stores as a null — is
     /// not checked here. It is refused for every strategy, per batch, in
     /// <see cref="RefuseEmptyPartitionValues"/>, so it cannot reach a merge commit; catching it a second
     /// time here would only mean two messages for one cause.
     ///
-    /// This check is bounded: nulls go through Arrow's own NullCount, so a key column with none costs
-    /// one read for the whole batch. The message names columns, never values. It sees only the buffer,
-    /// not the target table — a null key already sitting in the table that no incoming row touches is
-    /// outside its reach, and reading the whole target on every merge would cost more than the operation
-    /// it protects.</summary>
+    /// Both checks are bounded. Nulls go through Arrow's own NullCount, so a key column with none costs
+    /// one read for the whole batch; only a FLOAT-typed key is walked row by row, and those are rare.
+    /// Every offending column is named in one message, and the message names columns, never values.
+    ///
+    /// It sees only the buffer, not the target table — a null or NaN key already sitting in the table
+    /// that no incoming row touches is outside its reach, and reading the whole target on every merge
+    /// would cost more than the operation it protects.</summary>
     private void RefuseUnmatchableKeys()
     {
         var nullable = new SortedSet<string>(StringComparer.Ordinal);
+        var notANumber = new SortedSet<string>(StringComparer.Ordinal);
 
         foreach (var batch in this.buffered)
         {
@@ -264,25 +334,82 @@ internal sealed class DeltaWriteSession(
                 // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive. A key
                 // naming no column of the batch was already refused at BeginWriteAsync.
                 var index = batch.Schema.GetFieldIndex(key, StringComparer.Ordinal);
-                if (index >= 0 && batch.Column(index).NullCount > 0)
+                if (index < 0)
+                {
+                    continue;
+                }
+
+                var array = batch.Column(index);
+                if (array.NullCount > 0)
                 {
                     nullable.Add(key);
+                }
+
+                if (HasNaN(array))
+                {
+                    notANumber.Add(key);
                 }
             }
         }
 
-        if (nullable.Count == 0)
+        if (nullable.Count == 0 && notANumber.Count == 0)
         {
             return;
         }
 
+        var problems = new List<string>();
+        if (nullable.Count > 0)
+        {
+            problems.Add($"merge key column(s) {Names(nullable)} contain null values, and a null never " +
+                "equals anything");
+        }
+
+        if (notANumber.Count > 0)
+        {
+            problems.Add($"merge key column(s) {Names(notANumber)} contain NaN, which never equals itself");
+        }
+
         throw DeltaErrors.Fail(DeltaErrors.UnmatchableMergeKey,
-            $"output '{output}': merge key column(s) " +
-            $"{string.Join(", ", nullable.Select(c => $"'{c}'"))} contain null values, and a null never " +
-            "equals anything — those rows would be inserted a second time instead of updating the rows " +
-            "they belong to",
-            "filter or coalesce those columns in the pipeline SQL so every key value is present, or " +
-            "choose keys that are");
+            $"output '{output}': {string.Join("; ", problems)} — those rows match nothing, so every run " +
+            "would insert another copy of them instead of updating the rows they belong to",
+            "filter or coalesce those columns in the pipeline SQL so every key value is present and " +
+            "comparable, or choose keys that are");
+
+        static string Names(IEnumerable<string> columns) => string.Join(", ", columns.Select(c => $"'{c}'"));
+    }
+
+    /// <summary>Whether any non-null row of a float or double column holds NaN. Every other Arrow type
+    /// answers false: NaN is the only non-null value SQL has that is not equal to itself, and a
+    /// fixed-width integer or a string cannot carry one.</summary>
+    private static bool HasNaN(IArrowArray array)
+    {
+        switch (array)
+        {
+            case FloatArray f:
+                for (var row = 0; row < f.Length; row++)
+                {
+                    if (f.GetValue(row) is { } value && float.IsNaN(value))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            case DoubleArray d:
+                for (var row = 0; row < d.Length; row++)
+                {
+                    if (d.GetValue(row) is { } value && double.IsNaN(value))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            default:
+                return false;
+        }
     }
 
     /// <summary>Refuses a batch carrying an empty value in a partition column, on EVERY strategy.
@@ -336,8 +463,9 @@ internal sealed class DeltaWriteSession(
             $"output '{output}': partition column(s) " +
             $"{string.Join(", ", offenders.Select(c => $"'{c}'"))} contain an empty value. Delta writes " +
             "a partition value into a directory name, where an empty value is indistinguishable from a " +
-            "null, so those rows would read back as null in that column — and a merge keyed on such a " +
-            "column would insert a second copy of them on every run",
+            "null: a nullable partition column reads those rows back as null, and a NOT NULL one " +
+            "refuses the write outright. A merge keyed on such a column would insert a second copy of " +
+            "them on every run",
             "filter those rows out in the pipeline SQL, coalesce the column to a non-empty placeholder, " +
             "or partition by a column that is never empty");
     }
