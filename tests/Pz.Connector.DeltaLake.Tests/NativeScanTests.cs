@@ -90,4 +90,55 @@ public class NativeScanTests
     [Fact]
     public void The_connector_is_native_only_so_the_planner_refuses_force_universal_before_run_time() =>
         Assert.IsAssignableFrom<INativeOnlySource>(new DeltaLakeConnector());
+
+    [Fact]
+    public void A_union_by_name_option_is_emitted_as_a_named_argument()
+    {
+        var source = Open(("root", "/mnt/lake"));
+        source.TryGetNativeScan(Spec(("union_by_name", true)), out var scan);
+        Assert.Contains("union_by_name => true", scan!.SqlFragment);
+    }
+
+    [Fact]
+    public void A_union_by_name_option_left_unset_or_false_is_not_emitted()
+    {
+        var source = Open(("root", "/mnt/lake"));
+
+        source.TryGetNativeScan(Spec(), out var unset);
+        Assert.DoesNotContain("union_by_name", unset!.SqlFragment);
+
+        source.TryGetNativeScan(Spec(("union_by_name", false)), out var setFalse);
+        Assert.DoesNotContain("union_by_name", setFalse!.SqlFragment);
+    }
+
+    [Fact]
+    public void An_out_of_range_version_is_refused_with_PZDL0202_not_an_unhandled_overflow()
+    {
+        // DeltaLakeSchemas.Dataset declares "integer, minimum 0" with no maximum, so a JSON-valid
+        // integer wider than Int64 reaches TryGetNativeScan; it must fail as a coded
+        // PzConnectorException, not an unguarded OverflowException the planner cannot map to PZDL0202.
+        var source = Open(("root", "/mnt/lake"));
+        var ex = Assert.Throws<PzConnectorException>(
+            () => source.TryGetNativeScan(Spec(("version", "99999999999999999999")), out _));
+        Assert.Contains(DeltaErrors.VersionNotFound, ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public void The_fragment_and_setup_statements_are_byte_identical_for_identical_inputs()
+    {
+        // Node ids are content-addressed from this output, so two calls with the same spec must
+        // produce the same strings, not merely equivalent ones.
+        var source = Open(("root", "s3://w/d"), ("access_key_id", "AK"), ("secret_access_key", "SK"), ("region", "eu-west-1"));
+        var spec = Spec(("version", 12L), ("union_by_name", true)) with
+        {
+            WatermarkCursor = "updated_at", WatermarkValue = "2026-01-01", WatermarkUpperBound = "2026-02-01",
+        };
+
+        source.TryGetNativeScan(spec, out var first);
+        source.TryGetNativeScan(spec, out var second);
+
+        Assert.Equal(first!.SqlFragment, second!.SqlFragment);
+        Assert.Equal(first.SetupStatements, second.SetupStatements);
+    }
 }

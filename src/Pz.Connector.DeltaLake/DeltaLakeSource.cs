@@ -28,7 +28,22 @@ internal sealed class DeltaLakeSource(ConnectorConfig config) : ISource
         var args = new List<string> { $"'{location.Replace("'", "''")}'" };
         if (Option(spec, "version") is { } version)
         {
-            args.Add($"version => {long.Parse(version, CultureInfo.InvariantCulture)}");
+            // Schema validation (DeltaLakeSchemas.Dataset) checks "integer, minimum 0" but declares no
+            // maximum, so a JSON-valid integer wider than Int64 reaches here -- an unguarded long.Parse
+            // would throw OverflowException/FormatException, which the planner's TryGetNativeScan catch
+            // (Pz.Engine ExecutionPlanner) only maps to a coded error for PzConnectorException. Reusing
+            // VersionNotFound: a version value that cannot even be represented as a Delta version number
+            // can, by definition, never be found in the table's history -- same user-facing outcome as
+            // the design's other VersionNotFound use (a version absent from the transaction log), just
+            // caught one step earlier.
+            if (!long.TryParse(version, NumberStyles.Integer, CultureInfo.InvariantCulture, out var versionNumber))
+            {
+                throw DeltaErrors.Fail(DeltaErrors.VersionNotFound,
+                    $"dataset '{spec.Dataset}': 'version' value '{version}' is not a valid delta table version",
+                    "set 'version' to a non-negative integer that fits in a 64-bit signed integer");
+            }
+
+            args.Add($"version => {versionNumber.ToString(CultureInfo.InvariantCulture)}");
         }
 
         if (DeltaScanFragment.SupportsUnionByName && OptionBool(spec, "union_by_name"))
