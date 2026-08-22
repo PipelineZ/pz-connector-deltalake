@@ -1,12 +1,109 @@
 # Limitations
 
-Observed facts, each pinned to the versions it was observed against. Nothing here is a general claim
-about Delta, about delta-rs or about S3 — it is what this connector measured, on a date, against a
-build, and every one of them is reproduced by a test in this repository.
+Two kinds of thing live here. **What this connector does not do** — capabilities it deliberately does
+not have — and **measured behaviours you have to plan around**, each pinned to the version it was
+observed against. Nothing in the second part is a general claim about Delta, about delta-rs or about
+S3: it is what this connector measured, on a date, against a build, and every one of them is
+reproduced by a test in this repository.
 
-## Concurrent writes to S3 are only as safe as the endpoint
+## What this connector does not do
 
-**Measured 2026-08-22 against delta-rs 0.33.0 (DeltaLake.Net 0.33.0).**
+### Table maintenance: no vacuum, no compaction, no checkpoint
+
+`VacuumAsync`, `OptimizeAsync` and `CheckpointAsync` exist on the underlying table type and **none of
+them is surfaced**. pz has no verb that maps to table maintenance, so this is deliberate rather than
+overlooked — but it is a running cost you inherit:
+
+- A `remove` action does not delete a file, so every merge and every `replace` leaves its predecessor
+  on disk. Nothing here will ever clean that up.
+- Merging repeatedly grows the file count, and partitioning multiplies it. Nothing here will compact.
+- **No checkpoint is written.** Measured: a table taken to 13 commits with `DeltaLake.Net` 0.33.0 has
+  13 JSON commit files in `_delta_log/`, no `.checkpoint.parquet`, and no `_last_checkpoint`. A
+  long-lived table written only through this connector accumulates commit files indefinitely, and
+  every reader replays all of them.
+
+A table written through this connector must be maintained by whatever else you run against it, or not
+at all.
+
+### No change data feed, and no deletes
+
+There is no `sync: {mode: cdc}` source. The `ApplyDeletes` capability is deliberately not declared, so
+`on_delete: delete|soft` fails with **PZ0339** rather than half-working — the change-capture *source*
+half does not exist, and a half-wired capability is worse than an absent one.
+
+### No deletion vectors, column mapping, or change data feed on write
+
+This connector writes `minReaderVersion: 1, minWriterVersion: 2` tables — measured — and there is no
+option that turns any of the three optional features on. Reading a table that already uses one is
+untested in either direction: reads go through DuckDB's `delta` extension, and what it supports is
+DuckDB's business, not something measured here.
+
+### `partition_by:` cannot be declared through pz
+
+pz reads `partition_by:` as ONE column whose value substitutes calendar tokens in the sink's `path:`,
+and refuses it with **PZ0219** when the path carries none. Delta partitions declaratively by column
+value, with no templated path to route into, so **a Delta table written through pz is unpartitioned**
+— and a merge against it scans the whole table rather than the partitions the write touches. That is
+worth 19–38× on a merge, measured, and it is the largest single gap between this connector driven
+directly and this connector driven by pz.
+
+No test in this repository writes a Delta table through pz with a calendar-templated `path:`; that
+combination is neither covered nor meaningful for a store that partitions by column value.
+
+### The external-connector path does not work against pz 0.2.2
+
+A restored package does not load: pz's materializer extracts the wrong target framework and the wrong
+RID out of a multi-targeted, multi-RID dependency, and never places a dependency's native assets where
+the connector's load context probes. The causes are entirely in pz.
+[installing.md](installing.md) has each one, what it looks like when it bites, and the script that
+detects and stages around them.
+
+### Platform coverage
+
+`DeltaLake.Net` ships `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64` — that is what
+it SHIPS. **linux-x64 is the only platform anything here has been run on.** `linux-musl-x64` (Alpine)
+does not work at all, because pz selects native assets by exact RID match with no RID-graph fallback;
+`win-arm64` is not shipped by `DeltaLake.Net` at all.
+
+### Memory: `replace` and `merge` buffer the whole write
+
+Their semantics are defined over the entire input, so the buffer *is* the write. Only `append` flushes
+in bounded generations (`target_file_bytes`, default 128 MiB). A `replace` or `merge` of an output
+larger than available memory is not something this connector can stage around.
+
+### `append` is at-least-once
+
+A crash between a successful commit and pz recording it duplicates rows on `pz retry`. Closing that
+window needs a stable attempt identity, and pz's `OutputSpec` carries none — see
+[concepts/delivery-guarantees.md](concepts/delivery-guarantees.md).
+
+### Merges cannot see duplicates that are already in the table
+
+Delta enforces no primary key. If the target already holds two rows for one key, a merge updates
+**every** copy and leaves them all in place — measured; the write commits and reports success.
+Detecting it would mean reading the whole target table on every merge, which costs more than the
+operation it would protect. The same reach limit applies to the NULL/NaN key check: it reads the
+batches this write hands over, not the table.
+
+### Automatic merge pruning only applies when it is provably sound
+
+A partition predicate is derived from the incoming rows only when **every** partition column is also a
+merge key. Otherwise a row's partition value could change while its key did not, the derived predicate
+would hide that row's current partition from the target scan, and the merge would insert a second
+copy. The connector says why it skipped the derivation rather than staying silent.
+
+### Azure `replace`, `merge` and concurrent commits are not proven
+
+Not a claim that they fail — a statement that nothing here has run them. The emulator accepts one
+commit per table through a generic endpoint, so there is no way to exercise a strategy that needs a
+seeded target. `abfss://`-family roots are accepted and unit-tested at the classification level;
+nothing has ever written a table through one. [compatibility.md](compatibility.md) is the matrix.
+
+## Measured behaviours to plan around
+
+### Concurrent writes to S3 are only as safe as the endpoint
+
+**Measured 2026-08-22 against `DeltaLake.Net` 0.33.0, whose commits report `engineInfo: delta-rs:0.32.1`.**
 
 A Delta commit to an `s3://` root is an object-store PUT with `PutMode::Create` — a conditional PUT,
 carrying `If-None-Match` — and never a rename. Two consequences, both good:
@@ -43,7 +140,7 @@ since August 2024. **This repository has never talked to Amazon S3** — every m
 against MinIO — so that is AWS's claim, attributed, not a result established here. Verify it the same
 way you would verify any other endpoint:
 
-### How to check whether your endpoint enforces `If-None-Match`
+#### How to check whether your endpoint enforces `If-None-Match`
 
 Two conditional PUTs of the same key. The first must succeed and the second must be refused. If the
 second succeeds, concurrent Delta commits to that endpoint will be lost silently.
@@ -72,9 +169,9 @@ holds no keys at all.
 
 **A single-writer table is unaffected**, whatever the endpoint.
 
-## `replace` does not remove rows another writer committed while it was running
+### `replace` does not remove rows another writer committed while it was running
 
-**Measured 2026-08-22 against delta-rs 0.33.0, on local disk.**
+**Measured 2026-08-22 against `DeltaLake.Net` 0.33.0 (`engineInfo: delta-rs:0.32.1`), on local disk.**
 
 A `strategy: replace` write commits an overwrite that removes the files its own snapshot listed, taken
 when the write session opened. Rows another writer committed after that — and before this write
@@ -92,7 +189,7 @@ The replace commits three rows, ids 100–102:
 The window is the whole write session, which for a large output is the whole run. If `replace` must
 mean "the table holds exactly these rows", do not run two writers against that output at once.
 
-## Run artifacts name the storage locations a failure touched
+### Run artifacts name the storage locations a failure touched
 
 A write failure's message is written verbatim into `run_results.json` and onto the NDJSON event
 stream, and it carries what the storage layer said — which includes the **bucket or container, the

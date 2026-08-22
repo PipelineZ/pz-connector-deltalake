@@ -19,17 +19,17 @@ internal enum DeltaOperationKind
 /// <summary>The connector's error registry and the one place a delta-rs failure becomes a pz error.
 /// Codes carry a PZDL prefix rather than PZ: pz owns the PZ registry and wraps connector failures in
 /// its own node-failure code, so a connector minting PZ codes would collide with it. Every code here
-/// carries a next step in the message it is raised with; there is not yet a troubleshooting page
-/// listing them, and nothing enforces that there is one.</summary>
+/// carries a next step in the message it is raised with, and every one of them has an entry in
+/// docs/troubleshooting.md that DocsDriftTests holds to this list in both directions. A code declared
+/// here that nothing raises would therefore demand a troubleshooting entry for a symptom no user can
+/// ever see, which is why this list holds only codes that are actually thrown.</summary>
 internal static class DeltaErrors
 {
     // Configuration (offline validation).
     public const string UnsupportedRoot = "PZDL0101";
     public const string SchemeOptionMismatch = "PZDL0102";
     public const string MergeWithoutKeys = "PZDL0103";
-    public const string KeysOverlapPartitions = "PZDL0104";
     public const string VersionOnWrite = "PZDL0105";
-    public const string CalendarTokenInReadPath = "PZDL0106";
     public const string InvalidMergePredicate = "PZDL0107";
 
     /// <summary>A write option this connector cannot act on — an unrecognized name, a value of the
@@ -104,18 +104,15 @@ internal static class DeltaErrors
     /// filesystem — is a real delta-rs failure and is translated below.</summary>
     public const string UnusablePartitionValue = "PZDL0406";
 
-    // Protocol.
-    public const string UnsupportedProtocol = "PZDL0501";
-
     public static readonly IReadOnlyList<string> AllCodes =
     [
-        UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, KeysOverlapPartitions, VersionOnWrite,
-        CalendarTokenInReadPath, InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
+        UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, VersionOnWrite,
+        InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
         SchemaMismatch,
         UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, UnresolvableMergeKeyType,
         CommitConflict, DuplicateMergeKeys,
         UnsafeConcurrentS3,
-        WriteFailed, UnmatchableMergeKey, UnusablePartitionValue, UnsupportedProtocol,
+        WriteFailed, UnmatchableMergeKey, UnusablePartitionValue,
     ];
 
     /// <summary>Bare substrings identifying an S3 commit path that cannot be made safe. Both are

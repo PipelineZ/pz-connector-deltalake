@@ -3,6 +3,48 @@
 Three strategies: `append`, `replace`, `merge`. All three go through the universal Arrow path —
 DuckDB's delta extension is read-only, so there is no native-copy alternative on the write side.
 
+A write is declared as `sink()` keyword arguments in the pipeline's own SQL, or under
+`entities: <e>: write:` in `connections.yml` — never both, and never merged. The names are identical
+on both surfaces.
+
+```sql
+INSERT INTO {{ sink('lake', 'orders', strategy: 'merge', keys: ['id']) }}
+select id, dt, amount from {{ ref('stg_orders') }}
+```
+
+```yaml
+lake:
+  connector: deltalake
+  root: /srv/lake
+  entities:
+    orders:
+      write:
+        strategy: merge
+        keys: [id]
+```
+
+`strategy`, `keys`, `duplicates`, `on_delete`, `schema_policy` and `retry` are pz's own names; pz
+reads them itself and this connector never sees them. Everything else is a connector write option,
+and an unrecognized one is **PZDL0108** with the nearest known name suggested — never a silently
+ignored setting. Every problem with a write is reported at once.
+
+## Options
+
+| option | type | default | notes |
+|---|---|---|---|
+| `path` | string | the output's own name | The table's location under `root:`. An absolute path, or one carrying its own scheme, ignores `root:`. |
+| `partition_by` | list of column names | `[]` (unpartitioned) | Honoured only when the table is CREATED; a run against an already-partitioned table need not repeat it, and one that declares a different set than the table has is refused with PZDL0301. Must be a list — a bare string is PZDL0108, because a `partition_by: dt` quietly read as "no partitioning" would be a silent and permanent layout change. **Not declarable through pz today** — see below. |
+| `merge_predicate` | string | none | `merge` only. Narrows the merge's target scan. Read the section below before using it: a row it excludes is DUPLICATED, not skipped. |
+| `target_file_bytes` | integer > 0 | `134217728` (128 MiB) | `append` only: the buffered size at which an append flushes a generation, so memory tracks a file rather than the whole write. `replace` and `merge` are defined over their entire input and buffer all of it whatever this says. A value of zero or less is PZDL0108. |
+
+`max_rows_per_group` is deliberately **not** an option. Measured against DeltaLake.Net 0.33.0:
+writing 100,000 rows produces a single Parquet row group of 100,000 rows whether the underlying
+`MaxRowsPerGroup` is left unset or set to 1,000 (counted with DuckDB's `parquet_metadata`). The
+value does reach Rust — 0 aborts the write with `assertion failed: step != 0` — it simply has no
+effect on the output. Accepting it would make it a validated no-op that reads like a working
+setting; leaving it out makes it an honest "unknown write option" instead. It comes back the day it
+demonstrably shapes a row group.
+
 ## `merge`
 
 `keys:` is required and names the columns that identify a row. The generated statement joins the
@@ -10,14 +52,20 @@ target and the incoming batch on those columns, updates the non-key columns of e
 and inserts every row that does not.
 
 ```yaml
-outputs:
-  orders:
-    strategy: merge
-    keys: [order_id]
-    write:
-      partition_by: [dt]
-      merge_predicate: "target.dt >= '2026-01-01'"
+lake:
+  connector: deltalake
+  root: /srv/lake
+  entities:
+    orders:
+      write:
+        strategy: merge
+        keys: [order_id]
+        merge_predicate: "target.dt >= '2026-01-01'"
 ```
+
+That example omits `partition_by:` on purpose — pz refuses it here (PZ0219), for the reason in
+"`partition_by:` cannot be declared through pz today" below. Driven directly, it would sit beside
+`merge_predicate` in the same block.
 
 `merge_predicate` narrows the merge further. It may only compare column names against literals: every
 name must be qualified `target.` (a column of the table being written into) or `source.` (a column of
@@ -211,7 +259,7 @@ partition columns are part of the join*, which is what happens whenever `partiti
 `keys`. Through pz that condition cannot be met at all, because `partition_by` cannot be declared
 (above); these figures describe the connector driven directly.
 
-Measured with `MergeCostBench` (delta-rs 0.33.0 via DeltaLake.Net, local filesystem, 200 partitions,
+Measured with `MergeCostBench` (DeltaLake.Net 0.33.0, local filesystem, 200 partitions,
 1 000 source rows scattered across 5 of them, ids arranged so file statistics cannot prune on their
 own; each figure the median of repeated runs after a discarded warm-up):
 
