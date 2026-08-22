@@ -157,8 +157,9 @@ and their types. There is no configuration change that avoids it.
 
 **Documented limit: a duplicate already in the table is not detected, and not repaired.** If the table
 already holds two rows for one key — left by an older run, by a writer that is not pz, or by an
-`append` — a merge updates **every** copy and leaves them all in place. Measured against delta-rs
-0.33.0: the write commits, reports success, and the duplicate survives with the new values in both
+`append` — a merge updates **every** copy and leaves them all in place. Measured against
+`DeltaLake.Net` 0.33.0: the write commits, reports success, and the duplicate survives with the new
+values in both
 rows. Nothing here catches it, and `PZDL0402` does not fire for it. Detecting it would mean reading the
 whole target table on every merge, which costs more than the operation it would protect, so the
 connector does not. If you suspect duplicates in a table, check it directly.
@@ -202,7 +203,9 @@ this connector will not write:
   null is *not* refused: a null written is a null read back.
 - **A value whose directory name exceeds the filesystem's path-component limit** (255 bytes on the
   common local filesystems; object storage has no such limit). The value is percent-escaped on the way
-  in, so a shorter string can still exceed it.
+  in, so a shorter string can still exceed it. **Not a pre-flight refusal**, unlike the bullet above:
+  it is delta-rs failing to create a file, surfaced when it happens — measured, `WriteBatchAsync`
+  succeeds and the error comes out of `CommitAsync`.
 
 Every offending column is named in one message; the messages name columns and never values.
 
@@ -261,7 +264,9 @@ partition columns are part of the join*, which is what happens whenever `partiti
 
 Measured with `MergeCostBench` (DeltaLake.Net 0.33.0, local filesystem, 200 partitions,
 1 000 source rows scattered across 5 of them, ids arranged so file statistics cannot prune on their
-own; each figure the median of repeated runs after a discarded warm-up):
+own; each shape timed once after a discarded warm-up, and the three table sizes taken from separate
+invocations of that bench — the committed regression runs only the 2 000 000-row size, and asserts
+ratios rather than these figures):
 
 | table rows | partition column not joined | partition column joined | joined + derived `IN` list |
 |---|---|---|---|
@@ -271,7 +276,8 @@ own; each figure the median of repeated runs after a discarded warm-up):
 
 Two things follow, and the second was not what the design expected.
 
-**Joining on the partition column is worth 19–38x.** That is the number to protect, and
+**Joining on the partition column is worth 19–39x** — 1 601/85, 6 446/253, 23 793/604. That is the
+number to protect, and
 `MergeSafetyTests.Merge_cost_follows_the_partitions_the_write_touches_not_the_table` is what protects
 it (opt in with `PZDL_SLOW_TESTS=1`).
 

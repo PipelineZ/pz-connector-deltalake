@@ -111,6 +111,24 @@ public class DocsDriftTests
         Assert.Contains("musl", readme, StringComparison.Ordinal);
     }
 
+    /// <summary>The README introduces its `connections.yml` block as the sample project, so it has to
+    /// BE the sample project. An omitted connection is invisible to the yaml checker — that only
+    /// inspects mappings whose `connector:` is `deltalake`, and must not invent rules for the rest of
+    /// pz — yet it is the defect that makes the one page a stranger lands on fail two commands in.</summary>
+    [Fact]
+    public void The_readme_declares_every_connection_the_sample_project_does()
+    {
+        var sample = YamlDeclaredConnections(
+            File.ReadAllText(Path.Combine(RepoRoot(), "samples", "delta-roundtrip", "connections.yml")));
+        var readme = GovernedYamlBlocks()
+            .Where(b => b.File == "README.md")
+            .SelectMany(b => YamlDeclaredConnections(b.Block))
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(sample);
+        Assert.Equal(sample.Order().ToArray(), readme.Order().ToArray());
+    }
+
     /// <summary>Every link into this repository resolves. The documentation is only useful as a set —
     /// a page that promises a section on another page which nobody wrote sends a reader to a 404, and
     /// that is the one failure mode a docs tree in a separate repository cannot afford.</summary>
@@ -248,6 +266,11 @@ public class DocsDriftTests
     private static bool IsWorkingMaterial(string root, string file) =>
         Path.GetRelativePath(Path.Combine(root, "docs"), file)
             .Split(Path.DirectorySeparatorChar)[0] == SuperpowersDirectory;
+
+    /// <summary>Connection names in a connections.yml-shaped document: a top-level mapping whose value
+    /// declares a `connector:`. A project.yml fragment has no such mapping and contributes nothing.</summary>
+    private static HashSet<string> YamlDeclaredConnections(string yaml) =>
+        DocsYamlChecker.ConnectionNames(yaml);
 
     private static IEnumerable<(string File, string Block)> GovernedYamlBlocks() =>
         from file in GovernedMarkdown()

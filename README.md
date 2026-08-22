@@ -17,8 +17,10 @@ chain can still be exercised.
 
 **2. It is a 222 MB download.** `DeltaLake.Net` ships every RID's Rust libraries in one package, and
 `pz restore` prints nothing while fetching it. It is not hung — wait it out. 125 MB then lands in
-`~/.pz/cache` and 126 MB in `.pz/packages`, nearly all of it the two Rust libraries; the `linux-x64`
-native pair alone is 138 MB. All measured on linux-x64 with a cold cache, none projected.
+`~/.pz/cache` and 126 MB in `.pz/packages` — and that 126 MB is **the wrong RID's** Rust libraries,
+per point 1, which is why it is smaller than the 138 MB the `linux-x64` pair alone measures. Staging
+the correct pair alongside takes the directory to 263 MB. All measured on linux-x64 with a cold
+cache, none projected; `docs/installing.md` has the full table.
 
 **3. Platforms.**
 
@@ -55,6 +57,10 @@ seed:
 lake:
   connector: deltalake
   root: ${DELTA_LAKE_ROOT}
+
+report:
+  connector: localfiles
+  root: out/report
 ```
 
 `root:` must be absolute. pz hands a third-party connector no project-directory anchor, so a relative
@@ -94,18 +100,19 @@ order by dt
 
 ```bash
 export DELTA_LAKE_ROOT="$PWD/out/lake"
-pz restore
+pz restore --feeds <your-local-folder-feed> --feeds https://api.nuget.org/v3/index.json
 pz run orders_delta      # data/orders.csv -> a Delta table under $DELTA_LAKE_ROOT
 pz run orders_report     # that Delta table -> out/report/orders_report/*.csv
 ```
 
+`--feeds` is there because `0.1.0` is this connector's first tagged release: until that tag exists
+there is nothing on nuget.org under this id, so point the first feed at a folder holding a package
+you packed yourself and pin that version. `scripts/verify-external-connector.sh` does all of it for
+you. Once the release is out, a bare `pz restore` is enough.
+
 Two runs, not one: the lake is a store, not a DAG edge. pz derives edges from `ref()`, `source()` and
 `sink()` calls, and nothing connects the pipeline that writes `lake.orders` to the one that reads it,
 so bare `pz run` refuses with PZ0215 and `pz run --all` would schedule the read before the write.
-
-`0.1.0` is this connector's first tagged release. Until that tag exists there is nothing on nuget.org
-under this id: point `pz restore --feeds` at a local folder feed and pin the version you packed, which
-is what `scripts/verify-external-connector.sh` does for you.
 
 Re-running `orders_delta` updates those rows in place rather than duplicating them.
 
@@ -121,7 +128,7 @@ filesystem, 200 partitions, 1,000 source rows scattered across 5 of them):
 | 2 000 000 | 6 446 ms | 253 ms |
 | 8 000 000 | 23 793 ms | 604 ms |
 
-19–38×, widening with table size. The lever is partitioning the table and putting the partition
+19–39×, widening with table size. The lever is partitioning the table and putting the partition
 column in `keys:` — and **that is currently unreachable through pz**, which reads `partition_by:` as a
 calendar-token path template and refuses it (PZ0219) for a store that partitions by column value. A
 Delta table written through pz today is unpartitioned.

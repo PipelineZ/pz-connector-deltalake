@@ -22,6 +22,31 @@ internal static class DocsYamlChecker
     private static readonly string[] PzWriteNames =
         ["strategy", "keys", "duplicates", "on_delete", "schema_policy", "retry"];
 
+    /// <summary>Top-level names in a connections.yml-shaped document that declare a `connector:`.
+    /// A document that is not connections.yml-shaped — a project.yml fragment, a bare list — yields
+    /// none rather than throwing: the caller is comparing sets, not validating.</summary>
+    public static HashSet<string> ConnectionNames(string yaml)
+    {
+        object? graph;
+        try
+        {
+            graph = new DeserializerBuilder().Build().Deserialize<object>(new StringReader(yaml));
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+
+        if (graph is not IDictionary<object, object> map)
+        {
+            return [];
+        }
+
+        return [.. map
+            .Where(kv => kv.Value is IDictionary<object, object> body && body.ContainsKey("connector"))
+            .Select(kv => kv.Key as string ?? kv.Key.ToString() ?? string.Empty)];
+    }
+
     public static IReadOnlyList<string> Problems(string block, string file)
     {
         object? graph;

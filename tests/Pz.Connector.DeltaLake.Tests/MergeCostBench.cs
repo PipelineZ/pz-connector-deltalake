@@ -17,7 +17,7 @@ namespace Pz.Connector.DeltaLake.Tests;
 /// produces.</description></item>
 /// </list>
 ///
-/// The result, on delta-rs 0.33.0 (see docs/reference/write.md for the table): unpruned costs 19–38x
+/// The result, on DeltaLake.Net 0.33.0 (see docs/reference/write.md for the table): unpruned costs 19–39x
 /// partition-joined, and DERIVED IS INDISTINGUISHABLE FROM PARTITION-JOINED. delta-rs builds its own
 /// early filter from the source's partition values when the partition column is joined, which is
 /// exactly and only the case in which deriving one is sound — so the connector's IN list is a hedge

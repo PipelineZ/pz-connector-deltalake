@@ -10,7 +10,7 @@ namespace Pz.Connector.DeltaLake;
 /// carrying one key are two independent matches: if the target already holds that key delta-rs refuses
 /// the whole statement, and if it does NOT, both rows fall to WHEN NOT MATCHED and both are INSERTED —
 /// one commit, no error, and a table holding a duplicate of a key the output declared unique. Measured
-/// against delta-rs 0.33.0, both halves; the second is the dangerous one, because it looks exactly like
+/// against DeltaLake.Net 0.33.0, both halves; the second is the dangerous one, because it looks exactly like
 /// a successful merge.
 ///
 /// Last-writer-wins — the LATER row for a key is the one that lands — is the merge contract the rest of

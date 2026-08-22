@@ -81,7 +81,10 @@ commits overwrite one another and **every writer reports success**.
 That is measured, not theoretical: against MinIO `RELEASE.2023-01-31T02-24-19Z`, 40 concurrent commits
 all reported success and **10** survived. Against `RELEASE.2025-09-07T16-13-09Z`, all 40 survived.
 
-AWS documents conditional writes on `PutObject` via `If-None-Match`, available since August 2024.
+AWS documents conditional writes on `PutObject` via `If-None-Match`
+([S3 user guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)) and
+announced the feature on 20 August 2024
+([AWS What's New](https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/)).
 **This repository has never talked to Amazon S3** — every measurement here is against MinIO — so that
 is AWS's claim, attributed, not a result established here.
 

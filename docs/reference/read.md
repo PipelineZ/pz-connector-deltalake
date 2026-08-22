@@ -28,7 +28,7 @@ cut-and-paste.
 |---|---|---|---|
 | `path` | string | the entity's own name | The table's location under `root:`. An absolute path, or one carrying its own scheme, ignores `root:`. Calendar tokens (`{yyyy}/{MM}/{dd}`) are refused: Delta partitions declaratively by column value and has no templated path to expand, so a token here would be taken literally and find nothing. |
 | `version` | integer, ≥ 0 | the table's latest version | Time travel. Reads the table as of that commit — see [how-to/time-travel.md](../how-to/time-travel.md). A value that is not a non-negative integer fitting in 64 bits is refused with PZDL0202 before anything is opened; a version the transaction log does not HOLD is not detected until the table is opened, and surfaces as PZDL0201 from the schema probe. Declared on a write, it is PZDL0105. |
-| `union_by_name` | boolean | false | Unifies columns across data files by NAME rather than by position, for a table whose files disagree on column order. Accepted by `delta_scan` on DuckDB 1.5.5, which is what this connector pins; it is emitted only because that was measured, not because the parameter is documented to exist. |
+| `union_by_name` | boolean | false | Unifies columns across data files by NAME rather than by position, for a table whose files disagree on column order. Accepted by `delta_scan` on DuckDB 1.5.5, which is the version pz's own `Pz.DuckDb` pins today and the one this repository's tests measure against — this connector references no DuckDB of its own and cannot hold that version still. Emitted only because the acceptance was measured, not because the parameter is documented to exist. |
 
 ## What the connector pushes down, and what it does not
 

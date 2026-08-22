@@ -86,7 +86,7 @@ meanings never meet: **a Delta table written through pz today is unpartitioned.*
 partitioning and its partition-pruned merge are reachable only when it is driven directly.
 
 What that costs is measured in `reference/write.md` — joining on the partition column is worth
-19–38x on a merge, and that is the number currently out of reach through pz.
+19–39x on a merge, and that is the number currently out of reach through pz.
 
 ## What the dependency costs, and how long it looks broken
 

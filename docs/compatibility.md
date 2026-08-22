@@ -6,7 +6,9 @@ against.
 
 ## Protocol features
 
-What this connector's stack writes, measured off the transaction logs it produces:
+Feature names and version semantics below are the
+[Delta Transaction Log Protocol](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)'s. What
+this connector's stack writes was measured off the transaction logs it produces:
 
 | | |
 |---|---|
@@ -108,7 +110,7 @@ does not mean every guard on the path ran.
 | | version |
 |---|---|
 | `DeltaLake.Net` | 0.33.0 |
-| delta-rs, as its own commits report it | `delta-rs:0.32.1` — the `engineInfo` field every commit this connector writes carries. The .NET package's version and the Rust crate's are NOT the same number; where a statement below is about the WRITER, this is the version it was measured against. |
+| delta-rs, as its own commits report it | `delta-rs:0.32.1` — the `engineInfo` field every commit this connector writes carries. The .NET package's version and the Rust crate's are NOT the same number; where a statement anywhere in these pages is about the WRITER, this is the version it was measured against. |
 | DuckDB | 1.5.5 (`DuckDB.NET.Data.Full`) |
 | connector ABI | `Pz.Connectors.Abstractions` 0.2.2 |
 | pz (the host, end-to-end run) | 0.2.2 |

@@ -26,7 +26,7 @@ orders/
 Partition columns are **not stored in the data files** — measured; the Parquet file above holds `id`
 and `amt` and no `dt`. An engine filtering on `dt` therefore prunes without opening a single file: it
 reads the values out of the log. That is why the pruning is free, and why joining on the partition
-column is worth 19–38× on a merge.
+column is worth 19–39× on a merge.
 
 [../delta-lake-primer.md](../delta-lake-primer.md) has the log excerpts.
 
@@ -54,15 +54,33 @@ as a write option, alongside `strategy` and `keys`. Two rules:
 
 ## Values a partition column cannot carry
 
-**PZDL0406** refuses these before anything is written, on `append`, `replace` and `merge` alike:
+**PZDL0406** covers two causes, on `append`, `replace` and `merge` alike — and they are caught at
+**different times**, which decides what state your table is in afterwards.
 
-- **An empty value.** A partition value becomes a directory name, and `col=` is what an empty string
-  produces *and* what a null produces. On a nullable partition column delta-rs accepts the write and
-  the rows read back with **null** — a silent change to your data. Both string and binary columns are
-  affected. A genuine null is not refused: a null written is a null read back.
-- **A value whose directory name exceeds the filesystem's path-component limit** — 255 bytes on the
-  common local filesystems; object storage has no such limit. The value is percent-escaped on the way
-  in, so a shorter string can still exceed it.
+**An empty value is refused before the batch is buffered.** Nothing is written. A partition value
+becomes a directory name, and `col=` is what an empty string produces *and* what a null produces. On
+a nullable partition column delta-rs accepts such a write and the rows read back with **null** — a
+silent change to your data — so this one is checked per batch, up front, rather than translated from
+a failure that never comes. Both string and binary columns are affected. A genuine null is not
+refused: a null written is a null read back.
+
+**A value too long for the filesystem is a run-time failure, not a pre-flight refusal.** The cap is
+255 bytes on the common local filesystems (object storage has no such limit), and the value is
+percent-escaped on the way in, so a shorter string can still exceed it. This one cannot be caught
+before the write: it is delta-rs failing to create a file, translated when it surfaces. Measured —
+`MergeErrorTests.A_partition_value_too_long_for_the_filesystem_is_reported_without_the_value` hands
+over a 300-character value, `WriteBatchAsync` **succeeds**, and the error is thrown out of
+`CommitAsync`.
+
+So do not assume storage is untouched. delta-rs writes data files first and commits the log entry
+last — this repository measured an orphan `part-*.snappy.parquet` left behind by the other write-time
+failure it reproduces ([../troubleshooting.md](../troubleshooting.md)) — and on an `append` large
+enough to have flushed a generation, that generation has already committed. What this repository has
+*not* measured is exactly what a too-long partition value leaves behind; check the table's prefix
+rather than assume.
+
+An empty or null value in a column the table declares `NOT NULL` is the same code by the same
+run-time route: delta-rs fails the insert, and only after the table exists.
 
 Every offending column is named in one message. The messages name columns and never values.
 

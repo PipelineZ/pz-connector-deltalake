@@ -41,7 +41,7 @@ split is: **DuckDB owns the read data plane; delta-rs owns writes and table meta
 ## Why writes go through delta-rs
 
 Because DuckDB cannot write Delta at all. `COPY … TO … (FORMAT delta)` does not exist — the extension
-is read-only, verified against the DuckDB this connector pins. So `TryGetNativeCopy` returns false
+is read-only, verified against DuckDB 1.5.5 with the `delta` extension. So `TryGetNativeCopy` returns false
 unconditionally and every write is a universal-path write: pz hands the sink Arrow `RecordBatch`es
 and delta-rs turns them into Parquet files and a commit.
 

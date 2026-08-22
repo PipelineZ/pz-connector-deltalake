@@ -65,7 +65,7 @@ internal static class DeltaErrors
     public const string CommitConflict = "PZDL0401";
     public const string DuplicateMergeKeys = "PZDL0402";
     /// <summary>An S3 commit that did not go through the commit path this connector configures.
-    /// delta-rs 0.33.0 commits to s3:// with a conditional PUT and never with a rename (measured — see
+    /// DeltaLake.Net 0.33.0 commits to s3:// with a conditional PUT and never with a rename (measured — see
     /// <see cref="DeltaStorageOptions"/>), and that is what makes a second writer safe; anything that
     /// replaces or removes that path is this code. Two causes reach it, and they differ in how:
     /// <list type="bullet">
@@ -361,7 +361,7 @@ internal static class DeltaErrors
             // wordings were rejected on measurement rather than taste. "Deduplicate upstream" is wrong
             // because the input IS deduplicated by the time delta-rs sees it. "Remove the duplicate
             // rows from the table" is wrong because a duplicated key in the TARGET does not produce
-            // this error at all: measured against delta-rs 0.33.0, a merge into a table holding two
+            // this error at all: measured against DeltaLake.Net 0.33.0, a merge into a table holding two
             // rows for one key commits, updates both copies and leaves the duplicate in place,
             // silently. That is a documented limit, not this code path.
             return Fail(DuplicateMergeKeys,

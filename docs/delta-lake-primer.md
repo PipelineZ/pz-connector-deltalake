@@ -7,6 +7,12 @@ merge costs what it costs, why two writers can conflict, why deleted files linge
 
 This page is the protocol. It assumes you know ETL and Parquet, and nothing about Delta.
 
+The protocol itself is specified in the
+[Delta Transaction Log Protocol](https://github.com/delta-io/delta/blob/master/PROTOCOL.md), which is
+the authority for everything described here as protocol behaviour — action types, reader and writer
+versions, table features, partition value serialization. This page is the working subset, plus what
+this connector actually does.
+
 **Every log excerpt below was produced by this connector's own stack on 2026-08-22** — `DeltaLake.Net`
 0.33.0, whose commits report `engineInfo: delta-rs:0.32.1`, on local disk. The JSON is verbatim apart
 from line wrapping and a few elided timestamps; the files themselves hold one JSON object per line.
@@ -137,6 +143,32 @@ Three things to take from that commit, because each one explains a cost you will
   target scan. Narrowing that scan is where merge performance lives — see
   [how-to/tune-a-slow-merge.md](how-to/tune-a-slow-merge.md).
 
+### What a `MERGE` joins — and what Delta does not enforce
+
+Two protocol facts sit behind that commit, and both surprise people arriving from a database.
+
+**Delta enforces no primary key.** There is no uniqueness constraint anywhere in the format — the log
+declares a schema and partition columns, and nothing else. A Delta table can hold two rows with the
+same `id` and be perfectly valid. Nothing detects it, nothing repairs it, and a merge will not tell
+you: measured against `DeltaLake.Net` 0.33.0, a merge into a table already holding two rows for one
+key **commits, updates both copies, and leaves the duplicate in place**. If you need a key to be
+unique, you are the one enforcing it.
+
+**A `MERGE` matches the target against the source.** Look at the commit's own
+`mergePredicate: "target.id = source.id"`. Every target row is tested against the incoming rows —
+which is not the same thing as "each incoming row is applied once". Two incoming rows carrying the
+same key are two independent matches, and Delta has no rule for which of them wins:
+
+- if that key is **already in the table**, delta-rs refuses the whole statement — "multiple source
+  rows";
+- if it is **not**, both rows fall to `WHEN NOT MATCHED` and **both are inserted**. One commit, no
+  error, and a duplicate of a key you thought was unique.
+
+That is the raw protocol behaviour. This connector does not leave you with it: it resolves an
+incoming key named twice to its last row before the statement runs, so a write carrying a repeat
+lands exactly one row for it. But the reason that resolution has to exist is entirely in the two
+paragraphs above, and it is why a merge cannot clean up duplicates that are already there.
+
 ## 3. Versions and time travel
 
 Every commit is a version. Version *N* is the table you get by replaying commits `0 … N` and stopping
@@ -236,7 +268,7 @@ Three practical consequences:
 
 - **Pruning a partitioned scan is free.** An engine filtering on `dt` does not open a single file to
   decide which ones to skip; it reads `partitionValues` out of the log. This is why joining on the
-  partition column is the biggest single lever on merge cost — measured at **19–38×** in
+  partition column is the biggest single lever on merge cost — measured at **19–39×** in
   [reference/write.md](reference/write.md).
 - **A partition value is a directory name, and inherits that layer's limits.** A component longer than
   the filesystem allows (255 bytes on the common local filesystems) fails, and the value is
@@ -245,6 +277,25 @@ Three practical consequences:
   produces, and it is what a null produces. Written to a nullable partition column, empty strings
   read back as **null** with no error anywhere. This connector refuses that write outright
   (PZDL0406) rather than let it change your data quietly.
+
+### An overwrite is total, not per-partition
+
+If you arrive from Spark's dynamic partition overwrite, this is the one to read twice. An overwrite
+in Delta replaces the **whole table**, not the partitions the incoming data happens to touch. Every
+active file is removed and rewritten from what this write carries, partitions this run never
+mentioned included.
+
+Measured: on a table partitioned by `dt` with rows in two partitions, an overwrite writing only the
+first leaves the second partition's row **gone**.
+
+The protocol does allow a scoped overwrite — a `replaceWhere` predicate that confines it to matching
+rows. **This connector never sets one**, on any strategy, and that is load-bearing rather than
+incidental: `strategy: replace` is the one strategy allowed to add a `NOT NULL` column to a table,
+and that exemption is only sound while no row can survive the write. A partial overwrite would leave
+rows behind that predate the column.
+
+So `strategy: replace` means "the table holds exactly what this run produced". Time travel is
+unaffected — an older version still carries its own files and its own schema.
 
 ## 6. Statistics, and why they sometimes do nothing
 
@@ -313,12 +364,19 @@ the engine's own retry policy decides what happens next. Commit conflicts are no
 That whole design rests on the store being able to say "this key already exists" atomically.
 
 - **A POSIX filesystem** can: an atomic create.
-- **An object store** historically could not. S3's `PutObject` overwrote silently, which is why older
-  Delta stacks needed an external lock table (DynamoDB) to serialize commits.
-- **Modern S3-compatible endpoints** support a conditional PUT — `If-None-Match: *` — which restores
-  put-if-absent. This connector commits with one and pins the mechanism explicitly rather than
-  inheriting a library default. It never sets `AWS_S3_ALLOW_UNSAFE_RENAME`, the option that trades a
-  loud refusal for silently overwritten commits, and it needs no lock table.
+- **An object store** historically could not. A plain S3 `PutObject` overwrites, which is why older
+  Delta stacks needed an external lock table (DynamoDB) to serialize commits — that history is
+  delta-rs's and AWS's, not something this repository measured.
+- **Conditional writes restore put-if-absent.** AWS documents `If-None-Match` on `PutObject`,
+  refusing the second write with `412 Precondition Failed`
+  ([S3 user guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)),
+  announced 20 August 2024
+  ([AWS What's New](https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/)).
+  **No test in this repository has ever talked to Amazon S3** — everything measured below is MinIO —
+  so AWS's half of this is attributed, not established here. This connector commits with a
+  conditional PUT and pins the mechanism explicitly rather than inheriting a library default. It
+  never sets `AWS_S3_ALLOW_UNSAFE_RENAME`, the option that trades a loud refusal for silently
+  overwritten commits, and it needs no lock table.
 
 **What goes wrong without it is silent.** An endpoint that accepts `If-None-Match` and ignores it lets
 every writer succeed and lets the last one win. Measured, 4 writers × 10 rounds against two MinIO

@@ -9,7 +9,8 @@ namespace Pz.Connector.DeltaLake.Tests;
 /// can produce that is SILENT: a commit that is overwritten, a run that reports success, and rows that
 /// are simply not there afterwards.
 ///
-/// What was measured, against delta-rs 0.33.0 (DeltaLake.Net 0.33.0) on 2026-08-22:
+/// What was measured, against DeltaLake.Net 0.33.0 (whose commits report engineInfo delta-rs:0.32.1)
+/// on 2026-08-22:
 /// <list type="bullet">
 /// <item><description>A commit to an s3:// root is an object_store put with <c>PutMode::Create</c> — a
 /// conditional PUT — and never a rename. Reached by setting <c>AWS_CONDITIONAL_PUT=disabled</c>, which

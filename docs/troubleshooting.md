@@ -301,6 +301,12 @@ accepted and the rows read back as **null**. And a path component has a length c
 common local filesystems; the value is percent-escaped on the way in, so a shorter string can still
 exceed it. Object storage has no such limit.
 
+**When each is caught.** The empty value is refused **before the batch is buffered**, so nothing is
+written. The length case cannot be: it is delta-rs failing to create a file, and it surfaces at the
+commit — measured, `WriteBatchAsync` succeeds and the throw comes out of `CommitAsync`. So do not
+assume storage is untouched after one; see the orphan-file note under PZDL0403 for what a failure at
+that stage can leave behind.
+
 **Fix.** Filter those rows out, coalesce the column to a non-empty placeholder, or partition by a
 column that is never empty. For the length case: hash or truncate the column, partition by a narrower
 one, or write to a shorter root path. A genuine null is *not* refused — a null written is a null read
@@ -384,7 +390,8 @@ Measured on linux-x64 with a cold cache:
 | | |
 |---|---|
 | `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz materializes it today | 126 MB |
+| `.pz/packages` as pz materializes it today | 126 MB — and unusable, being the wrong RID's pair (see "The connector does not load at all") |
+| `.pz/packages` once the verify script stages the correct pair beside it | 263 MB |
 | the `linux-x64` native pair alone | 138 MB |
 
 On top of that, a Delta table only grows: a `remove` action does not delete a file, so every merge and

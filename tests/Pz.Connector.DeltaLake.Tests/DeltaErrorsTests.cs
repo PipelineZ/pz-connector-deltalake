@@ -402,7 +402,7 @@ public class DeltaErrorsTests
     [Fact]
     public void Translate_never_leaks_the_rows_delta_rs_previews_on_a_validation_failure()
     {
-        // Verbatim from real delta-rs 0.33.0: a batch holding nulls in a column the table declares NOT
+        // Verbatim from a real DeltaLake.Net 0.33.0: a batch holding nulls in a column the table declares NOT
         // NULL. Reachable on the plainest append there is, and no pre-flight guard can stop it — an
         // Arrow schema's nullability flag says nothing about whether the batch contains nulls.
         var raw = new DeltaLakeException(

@@ -169,7 +169,8 @@ internal static class DeltaStorageOptions
             options["AWS_ALLOW_HTTP"] = "true";
         }
 
-        // The commit mechanism, PINNED rather than inherited. Measured against delta-rs 0.33.0 and a
+        // The commit mechanism, PINNED rather than inherited. Measured against DeltaLake.Net 0.33.0 (whose
+        // commits report engineInfo delta-rs:0.32.1) and a
         // real MinIO: a delta commit to an s3:// root is an object_store put with PutMode::Create -- a
         // conditional PUT, keyed on If-None-Match -- and never a rename, which is why the LockClient /
         // AWS_S3_ALLOW_UNSAFE_RENAME question this connector was built around has an answer of "neither

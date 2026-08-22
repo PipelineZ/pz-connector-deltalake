@@ -58,8 +58,9 @@ warehouse:
         union_by_name: true
 ```
 
-It is emitted only because it was measured to be accepted by `delta_scan` on the DuckDB this connector
-pins.
+It is emitted only because it was measured to be accepted by `delta_scan` on DuckDB 1.5.5 — the
+version pz pins today. This connector references no DuckDB of its own, so a pz release that moves
+DuckDB moves this with it.
 
 ## Writing into a table someone else created
 

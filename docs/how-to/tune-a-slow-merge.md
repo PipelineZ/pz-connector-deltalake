@@ -12,7 +12,9 @@ table can rewrite most of the table if nothing narrows the target scan.
 
 Measured with `MergeCostBench` (DeltaLake.Net 0.33.0, local filesystem, 200 partitions, 1,000 source
 rows scattered across 5 of them, ids arranged so file statistics cannot prune on their own; each
-figure the median of repeated runs after a discarded warm-up):
+shape timed once after a discarded warm-up, and the three table sizes taken from separate invocations
+of that bench — the committed regression runs only the 2 000 000-row size, and asserts ratios rather
+than these figures):
 
 | table rows | partition column not joined | partition column joined |
 |---|---|---|
@@ -20,7 +22,7 @@ figure the median of repeated runs after a discarded warm-up):
 | 2 000 000 | 6 446 ms | 253 ms |
 | 8 000 000 | 23 793 ms | 604 ms |
 
-**19–38×.** That is the number to protect.
+**19–39×** (1 601/85, 6 446/253, 23 793/604). That is the number to protect.
 
 ## 1. Partition the table, and put the partition column in `keys:`
 

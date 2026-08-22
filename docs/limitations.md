@@ -44,7 +44,7 @@ pz reads `partition_by:` as ONE column whose value substitutes calendar tokens i
 and refuses it with **PZ0219** when the path carries none. Delta partitions declaratively by column
 value, with no templated path to route into, so **a Delta table written through pz is unpartitioned**
 — and a merge against it scans the whole table rather than the partitions the write touches. That is
-worth 19–38× on a merge, measured, and it is the largest single gap between this connector driven
+worth 19–39× on a merge, measured, and it is the largest single gap between this connector driven
 directly and this connector driven by pz.
 
 No test in this repository writes a Delta table through pz with a calendar-templated `path:`; that
@@ -135,10 +135,14 @@ there afterwards. The table above comes from a ten-round measurement run against
 that keeps it true — three rounds of the same four writers — and pointing its fixture at the 2023
 image fails it, on the row count, in the first round.
 
-**Amazon S3 itself.** AWS documents conditional writes on `PutObject` via `If-None-Match`, available
-since August 2024. **This repository has never talked to Amazon S3** — every measurement above is
-against MinIO — so that is AWS's claim, attributed, not a result established here. Verify it the same
-way you would verify any other endpoint:
+**Amazon S3 itself.** AWS documents conditional writes on `PutObject` via `If-None-Match`, refusing
+the second write with `412 Precondition Failed`
+([S3 user guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)), and
+announced the feature on 20 August 2024
+([AWS What's New](https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/)).
+**This repository has never talked to Amazon S3** — every measurement above is against MinIO — so
+that is AWS's claim, attributed, not a result established here. Verify it the same way you would
+verify any other endpoint:
 
 #### How to check whether your endpoint enforces `If-None-Match`
 
