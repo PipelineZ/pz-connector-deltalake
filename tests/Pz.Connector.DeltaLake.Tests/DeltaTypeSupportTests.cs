@@ -165,8 +165,8 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             // write-time conversion itself refuses these types, only that the type never gets that far.
             // FixedSizeList is the one named exception: its CREATE succeeds, so ProbeInsertAsync's
             // InsertAsync call genuinely runs and is the ONLY evidence that refuses it -- the opposite
-            // situation from every other refused candidate, and exactly the case Finding 5 was raised
-            // to make explicit rather than paper over with a blanket claim. For every ACCEPTED
+            // situation from every other refused candidate, and the reason this paragraph is spelled
+            // out rather than replaced by a blanket "create and insert agree". For every ACCEPTED
             // candidate, InsertAsync likewise genuinely runs to completion and DOES exercise the
             // separate write path -- that half of the agreement is real, independent evidence too.
             if (createAccepted != insertAccepted)
@@ -370,9 +370,13 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
             .Field(f => f.Name("b").DataType(DurationType.Microsecond).Nullable(true))
             .Build();
 
+        // Quoted, and it has to be. Assert's fixed wording contains a bare "a" unconditionally, in
+        // "have", "Lake", "cast" and "a supported type" -- so Assert.Contains("a", ...) passed even
+        // when the message named NO columns at all, which is exactly the failure this test's name
+        // promises to catch. The quoted form appears only where a column is named.
         var ex = Assert.Throws<PzConnectorException>(() => DeltaTypeSupport.Assert(schema));
-        Assert.Contains("a", ex.Message);
-        Assert.Contains("b", ex.Message);
+        Assert.Contains("'a'", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("'b'", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

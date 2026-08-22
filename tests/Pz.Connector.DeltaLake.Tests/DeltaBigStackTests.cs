@@ -124,6 +124,11 @@ public class DeltaBigStackTests
     {
         // 180000 is what DeltaLake.Net's own tests ask users to set via DOTNET_DefaultStackSize;
         // this connector must be comfortably above it so no user ever has to.
+        //
+        // Both operands are const, so the comparison folds at compile time -- which does NOT make this
+        // an assertion that cannot fail, and the distinction is worth writing down because it reads
+        // like one. The FOLD happens at compile time; the ASSERT still happens at run time, over
+        // whatever the fold produced. Measured: lowering StackBytes to 512 KiB fails this test.
         Assert.True(DeltaBigStack.StackBytes >= 180_000 * 4);
     }
 

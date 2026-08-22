@@ -22,12 +22,18 @@ internal sealed record DeltaWriteOptions(
     /// enough that a large append does not hold the whole write in memory.</summary>
     private const long DefaultTargetFileBytes = 128L * 1024 * 1024;
 
+    /// <summary>The strategies this sink implements. Kept here rather than inferred from the switch in
+    /// DeltaWriteSession.CommitAsync, because an unrecognised one has to be refused BEFORE a table is
+    /// opened — that switch runs after the create and after the whole write has been buffered.</summary>
+    private static readonly string[] Strategies = ["append", "replace", "merge"];
+
     private readonly record struct Problem(string Code, string What, string NextStep);
 
     public static DeltaWriteOptions From(OutputSpec spec)
     {
         var problems = new List<Problem>();
         CheckNames(spec, problems);
+        CheckStrategy(spec, problems);
 
         var partitionBy = StringList(spec, "partition_by", problems);
         var mergePredicate = Text(spec, "merge_predicate", problems);
@@ -47,6 +53,27 @@ internal sealed record DeltaWriteOptions(
 
         return new DeltaWriteOptions(
             spec.Mode, spec.Keys, partitionBy, mergePredicate, targetFileBytes ?? DefaultTargetFileBytes);
+    }
+
+    /// <summary>Refuses a strategy this sink does not implement, here rather than at commit.
+    ///
+    /// Left to CommitAsync's default arm, an unrecognised strategy passed BeginWriteAsync,
+    /// OpenOrCreateAsync CREATED the Delta table, and every batch was buffered — the flush trigger is
+    /// gated on "append", so nothing drained — before PZDL0108 was raised over a table the run had
+    /// just brought into existence and a whole write held in memory. That contradicts the rule this
+    /// file states elsewhere: a configuration error must not open, create or touch a table. Unreachable
+    /// through pz, which validates strategy itself; reachable driven directly, which is the documented
+    /// way to get partitioning.</summary>
+    private static void CheckStrategy(OutputSpec spec, List<Problem> problems)
+    {
+        if (Strategies.Contains(spec.Mode, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
+            $"unsupported write strategy '{spec.Mode}'",
+            $"use strategy: {string.Join(", ", Strategies)}"));
     }
 
     /// <summary>The only validation output options ever get: pz schema-validates source dataset

@@ -243,6 +243,33 @@ public class DeltaMergeSqlTests
         Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
     }
 
+    [Fact]
+    public void A_target_column_whose_name_carries_a_quote_cannot_be_named_in_a_predicate()
+    {
+        // The one side RefuseUnquotableNames does not cover, and cannot: it refuses the write's OWN
+        // column names, and a target column is never rendered into the statement, so refusing a merge
+        // for a table column this write does not touch would cost writes that are perfectly safe.
+        //
+        // Reachable: an append (which never runs RefuseUnquotableNames) creates the two columns below,
+        // a later merge under schema_policy: evolve selects neither, and the merge_predicate names
+        // one. TryReadWord does not read a doubled quote back as one character, so the word `a""b`
+        // matched the column literally named a""b and the predicate was admitted -- and the predicate
+        // text is interpolated VERBATIM, so delta-rs then collapsed the doubled quote and resolved it
+        // to the OTHER column, a"b. That is the mis-resolution the three refusals exist to prevent.
+        var targetColumns = new[] { "id", "dt", "amt", "a\"b", "a\"\"b" };
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(
+            () => DeltaMergeSql.Build(DeltaTestTable.Schema, targetColumns,
+                Opts(["id"], mergePredicate: "target.\"a\"\"b\" = 'x'"), null));
+        Assert.Contains(DeltaErrors.InvalidMergePredicate, ex.Message);
+
+        // The write itself is NOT refused: a table column carrying a quote costs only the predicate
+        // that names it, and a merge that leaves it alone still runs.
+        var sql = DeltaMergeSql.Build(DeltaTestTable.Schema, targetColumns, Opts(["id"]), null);
+        Assert.Contains("target.\"id\" = source.\"id\"", sql);
+        Assert.DoesNotContain("a\"b", sql);
+    }
+
     [Theory]
     [InlineData("   ")]
     [InlineData("\t\n")]
@@ -318,6 +345,10 @@ public class DeltaMergeSqlTests
         Assert.Contains("'z\"col'", ex.Message);
         Assert.Contains("'A\"b'", ex.Message);
         Assert.Contains("'a\"B'", ex.Message);
+        // Asserted PRESENT before its position is compared below. Without this line the ordering check
+        // passed on a report that had dropped the name entirely: IndexOf returns -1, which is less
+        // than any real index, so the check succeeded for exactly the regression it guards.
+        Assert.Contains("'Z\"a'", ex.Message);
 
         // Ordered by the names themselves, ordinally, so two runs over the same schema produce the
         // same message -- and so the order does not depend on which of columns, keys or partition

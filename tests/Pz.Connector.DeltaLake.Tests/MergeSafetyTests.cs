@@ -429,8 +429,12 @@ public class MergeSafetyTests
     [InlineData("unrenderable")]
     public void No_skip_reason_names_a_partition_value(string cause)
     {
-        // SkipReason reaches run artifacts and logs. Column names are the connector's own vocabulary;
-        // partition values are the user's data and must not travel with them.
+        // SkipReason reaches nobody today -- ABI 0.2.2 gives a sink no channel to put it on -- so this
+        // holds a property in reserve rather than protecting a live path. It is worth holding: the day
+        // the ABI grows a note or a warning, the reason has to be safe to put on it already, and a
+        // reason that had learned to name a value in the meantime would leak the user's data on the
+        // commit that started surfacing it. Column names are the connector's own vocabulary; partition
+        // values are the user's.
         const string Marker = "confidential-tenant";
 
         var outcome = cause switch

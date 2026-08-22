@@ -311,6 +311,26 @@ public class WriteSessionTests
     }
 
     [Fact]
+    public async Task An_unknown_strategy_is_refused_before_the_table_is_created()
+    {
+        // It used to be refused at CommitAsync's default arm, which is after OpenOrCreateAsync has
+        // CREATED the table and after every batch has been buffered -- nothing flushes, because the
+        // flush trigger is gated on "append". So a typo in strategy: left a Delta table behind and
+        // held the whole write in memory before saying anything. A configuration error must not open,
+        // create or touch a table.
+        var dir = TempDir("pz-delta-strategy");
+        await using var sink = await OpenSink(dir);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(Out("upsert"), DeltaTestTable.Schema, default));
+
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.Contains("upsert", ex.Message);
+        Assert.Contains("append, replace, merge", ex.Message);
+        Assert.False(Directory.Exists(Path.Combine(dir, "orders")));
+    }
+
+    [Fact]
     public void An_option_problem_carries_a_config_code_not_the_runtime_write_code()
     {
         // PZDL0404 is the runtime family — a storage-layer write failure. An option problem is decided

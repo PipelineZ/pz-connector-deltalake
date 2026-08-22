@@ -48,6 +48,9 @@ public class ConnectorIdentityTests
     public void Source_is_native_only()
     {
         // Turns engine.force_universal / files_per_partition into PZ0312 instead of a doomed run.
+        // The connector's declared interfaces are this file's subject, so this is the one copy of the
+        // assertion -- NativeScanTests carried an identical body under a different name, which is two
+        // tests failing together and telling a reader nothing the first did not.
         Assert.IsAssignableFrom<INativeOnlySource>(new DeltaLakeConnector());
     }
 

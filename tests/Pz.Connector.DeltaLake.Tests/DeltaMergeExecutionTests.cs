@@ -82,7 +82,10 @@ public class DeltaMergeExecutionTests
 
             var mapped = DeltaErrors.Translate(raw, DeltaOperationKind.Merge, "merge", ["id"]);
             Assert.Contains(DeltaErrors.DuplicateMergeKeys, mapped.Message);
-            Assert.Contains("id", mapped.Message);
+            // The PZDL0402 wording contains a bare "id" unconditionally, inside "did not recognise",
+            // so Assert.Contains("id", ...) passed whether or not Translate named the merge keys. The
+            // parenthesised form is the one only the key list produces.
+            Assert.Contains("(id)", mapped.Message, StringComparison.Ordinal);
             Assert.False(mapped.IsTransient);
 
             // The generated statement carries partition literals, which are the user's data, and is

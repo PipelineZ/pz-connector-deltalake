@@ -198,10 +198,11 @@ internal static class DeltaSecretSql
     private static string Literal(string value) => $"'{value.Replace("'", "''")}'";
 
     // DuckDB's secret SCOPE match is a plain string prefix match, not path-boundary-aware: an
-    // unnormalized scope of "s3://w/d" also matches the unrelated sibling "s3://w/d2/...", reopening
-    // the same cross-wiring Finding 1 closed, just narrower (confirmed against a real DuckDB 1.5.5).
-    // A trailing slash makes the prefix match only this root and its own subpaths — reuses
-    // DeltaLocation's trim so root and scope agree on one rule rather than two.
+    // unnormalized scope of "s3://w/d" also matches the unrelated sibling "s3://w/d2/..." (confirmed
+    // against a real DuckDB 1.5.5), so one connection's credential would be selected for another
+    // connection's root -- the cross-wiring this scope exists to prevent, narrowed to roots that share
+    // a string prefix. A trailing slash makes the prefix match only this root and its own subpaths --
+    // reuses DeltaLocation's trim so root and scope agree on one rule rather than two.
     private static string Scope(string root) => Literal(DeltaLocation.TrimTrailingSlash(root) + "/");
 
     private static string Sanitize(string name)

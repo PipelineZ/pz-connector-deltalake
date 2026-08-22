@@ -235,6 +235,47 @@ public class DeltaErrorsTests
         Assert.Contains(DeltaErrors.CommitConflict, ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>A READ that meets a conflict marker keeps PZDL0401 and its transient classification —
+    /// another writer committing mid-read is a real thing and re-reading picks up the new version —
+    /// but is NOT told it lost a commit race. A read never commits, so a reader sent looking for the
+    /// writer they raced is looking for something that does not exist.</summary>
+    [Fact]
+    public void Translate_does_not_tell_a_read_it_lost_a_commit_race()
+    {
+        var raw = new DeltaLakeException("Metadata changed since last commit", 1);
+
+        var read = DeltaErrors.Translate(raw, DeltaOperationKind.Read, "read of dataset 'orders'", []);
+        Assert.Contains(DeltaErrors.CommitConflict, read.Message, StringComparison.Ordinal);
+        Assert.True(read.IsTransient, read.Message);
+        Assert.DoesNotContain("commit race", read.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("overtaken", read.Message, StringComparison.Ordinal);
+
+        // The write half is unchanged, which is what makes the read wording a correction rather than a
+        // rewrite of the branch.
+        var write = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
+        Assert.Contains("lost a commit race", write.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The two markers that describe something only a WRITE does. On a read they fall through
+    /// to PZDL0201 rather than claiming the read put a value in a partition column or could not create
+    /// a file for one.</summary>
+    [Theory]
+    [InlineData("found unmasked nulls for non-nullable column 'dt'")]
+    [InlineData("Os { code: 36, kind: InvalidFilename, message: \"File name too long\" }")]
+    public void Translate_does_not_describe_a_read_as_a_partition_write_failure(string message)
+    {
+        var ex = DeltaErrors.Translate(
+            new DeltaLakeException(message, 1), DeltaOperationKind.Read, "read of dataset 'orders'", []);
+
+        Assert.Contains(DeltaErrors.TableUnreadable, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(DeltaErrors.UnusablePartitionValue, ex.Message, StringComparison.Ordinal);
+
+        // The write half still gets the specific message; only the read loses it.
+        var write = DeltaErrors.Translate(
+            new DeltaLakeException(message, 1), DeltaOperationKind.Write, "append of output 'orders'", []);
+        Assert.Contains(DeltaErrors.UnusablePartitionValue, write.Message, StringComparison.Ordinal);
+    }
+
     // The rename refusal's own wording ends "...to opt out of support for concurrent writers", and
     // "concurrent" is a bare conflict marker — so before PZDL0403 existed as a branch, this permanent
     // misconfiguration was reported as a retryable commit race and the engine would have retried a run

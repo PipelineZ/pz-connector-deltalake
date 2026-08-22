@@ -40,12 +40,10 @@ public class DeltaScanParameterProbeTests
         Assert.True(Accepts(", version => 0", table));
 
         // Not assertions about what SHOULD exist — a record of what DOES, pinned so a DuckDB bump
-        // that changes the surface fails here instead of at a user's run.
-        var pushdown = Accepts(", pushdown_filters => true", table);
-        var unionByName = Accepts(", union_by_name => true", table);
-        Assert.True(pushdown || !pushdown);       // record only
-        Assert.True(unionByName || !unionByName); // record only
-        Assert.Equal(DeltaScanFragment.SupportsPushdownFilters, pushdown);
-        Assert.Equal(DeltaScanFragment.SupportsUnionByName, unionByName);
+        // that changes the surface fails here instead of at a user's run. The two Assert.Equal calls
+        // ARE the pin; two `x || !x` lines used to sit above them, labelled "record only", which is
+        // Assert.True(true) written three ways and recorded nothing at all.
+        Assert.Equal(DeltaScanFragment.SupportsPushdownFilters, Accepts(", pushdown_filters => true", table));
+        Assert.Equal(DeltaScanFragment.SupportsUnionByName, Accepts(", union_by_name => true", table));
     }
 }

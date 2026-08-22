@@ -3,13 +3,16 @@ using Apache.Arrow;
 
 namespace Pz.Connector.DeltaLake;
 
-/// <summary>Either the filters to narrow a merge's target scan, or the reason none could be derived —
-/// the reason is surfaced to the user so a slow merge is explained rather than mysterious. Both null
-/// means there was nothing to derive at all (no partition columns, or no rows), which needs no
-/// explaining.
+/// <summary>Either the filters to narrow a merge's target scan, or the reason none could be derived.
+/// Both null means there was nothing to derive at all (no partition columns, or no rows).
 ///
-/// A reason names COLUMNS but never VALUES: it reaches run artifacts and logs, and a partition value is
-/// user data.</summary>
+/// <see cref="SkipReason"/> is NOT surfaced to the user, and nothing in this assembly reads it. There
+/// is nowhere to put it: connector ABI 0.2.2 gives a sink no note, warning or logger channel, and
+/// WriteResult carries only a row and a batch count — so a skipped derivation is invisible, and
+/// DeltaWriteSession's LastSkipReason is a test seam and only that. It is built to be SAFE to surface
+/// the day the ABI grows a channel additively: it names COLUMNS and character classes, never a value,
+/// because a partition value is user data. That is a property held in reserve, not a behaviour that
+/// exists.</summary>
 internal sealed record DerivationOutcome(IReadOnlyList<PartitionFilter>? Filters, string? SkipReason);
 
 /// <summary>Derives a partition predicate from the data being merged, and refuses to when doing so

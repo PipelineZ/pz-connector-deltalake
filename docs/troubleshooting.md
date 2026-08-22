@@ -97,6 +97,8 @@ the only thing standing between a typo and a silently ignored setting. Note the 
   unpartitioned table is a permanent layout mistake.
 - **`max_rows_per_group`** is deliberately not an option: it was measured to have no effect on the
   output, and a validated no-op that reads like a working setting is worse than an honest error.
+- **An unrecognised `strategy:`** is refused before the table is opened, so a typo leaves nothing
+  behind. `append`, `replace` and `merge` are the three.
 
 **Fix.** The message lists every known write option and suggests the nearest one. Every problem with a
 write is reported at once, so fix them all in one edit.
@@ -151,10 +153,18 @@ that race commits successfully, says nothing, and makes every later read of the 
 
 ### `PZDL0302`: an Arrow type Delta cannot store
 
-**Symptom.** "these columns have Arrow types Delta Lake cannot store", naming the columns.
+**Symptom.** "these columns have Arrow types Delta Lake cannot store", naming the columns, or
+"partition column(s) 'x' arrive dictionary-encoded".
 
 **Fix.** Cast them in the pipeline SQL — a duration or interval as a numeric count of units, a
 time-of-day as a string or a timestamp.
+
+- **A timestamp in a named or offset time zone** is refused: Delta stores every timestamp as an
+  instant in UTC. Convert it. A timezone that merely *spells* UTC differently (`+00:00`, `Z`) is not
+  refused — the connector normalises those, which is what makes pz's own timestamp columns writable.
+- **A dictionary-encoded partition column** is refused: Delta builds a partition directory from the
+  column's values and cannot do it from a dictionary encoding. The same column writes correctly when
+  it is not a partition column, so cast it or partition by another.
 
 ### `PZDL0303`: a merge key that is not a column of the data
 
@@ -187,7 +197,7 @@ SQL if the source column is nested.
 
 ## Writing, at run time
 
-### `PZDL0401`: a lost commit race, or a transient storage error
+### `PZDL0401`: another writer got there first, or a transient storage error
 
 **Symptom.** "the delta write lost a commit race against another writer", or "hit a transient storage
 error". Classified **transient**.
@@ -197,6 +207,12 @@ This is normal, not a fault.
 
 **Fix.** Usually nothing — pz's retry policy handles it, and connectors never retry internally. If it
 happens constantly, two writers are contending for one table; consider whether they should be.
+
+**On a read.** The same code, and the same transient classification, cover a READ overtaken by a
+writer committing mid-read — "the delta read of dataset 'x' was overtaken by another writer committing
+to the table while it was being read". Delta is a multi-writer format, so a reader meets a changed
+version as readily as a writer meets a taken one; re-reading picks up the new version. A read never
+loses a commit race, because it never commits, and it is not reported as though it had.
 
 ### `PZDL0402`: delta-rs reports more than one incoming row per merge key
 

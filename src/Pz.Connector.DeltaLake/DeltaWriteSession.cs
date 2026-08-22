@@ -64,9 +64,14 @@ internal sealed class DeltaWriteSession(
                     break;
 
                 default:
+                    // A backstop, not the report: DeltaWriteOptions.From refuses an unrecognised
+                    // strategy before a table is opened. This exists so a future strategy added there
+                    // and not here fails loudly rather than committing nothing and reporting success.
                     throw DeltaErrors.Fail(DeltaErrors.InvalidWriteOption,
-                        $"output '{output}': unsupported write strategy '{options.Mode}'",
-                        "use strategy: append, replace, or merge");
+                        $"output '{output}': write strategy '{options.Mode}' reached the commit with no " +
+                        "implementation behind it",
+                        "report this as a connector bug: the strategy passed validation and then had " +
+                        "nothing to do");
             }
         }
         finally

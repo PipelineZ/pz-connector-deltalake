@@ -367,6 +367,17 @@ internal static class DeltaMergeSql
                     i++;
                     if (!Qualifiers.Contains(word, StringComparer.Ordinal)
                         || !TryReadWord(predicate, ref i, out var column, out _)
+                        // A name carrying a '"' resolves against nothing, whichever side it names.
+                        // RefuseUnquotableNames covers the SOURCE side by refusing the whole write,
+                        // but it never sees targetColumns -- deliberately, because a target column is
+                        // never rendered into the statement and refusing a merge for a table column
+                        // this write does not touch would cost writes that are perfectly safe. So the
+                        // target side is closed here instead, where it costs only the predicate that
+                        // actually names one. Without it, `target."a""b"` was admitted for a table
+                        // column named a""b and then interpolated verbatim, where delta-rs collapses
+                        // the doubled quote and resolves it to a DIFFERENT column -- the exact
+                        // mis-resolution the three refusals exist to prevent.
+                        || !IsQuotableName(column)
                         || !Side(word).Contains(column, StringComparer.Ordinal))
                     {
                         return PredicateVerdict.Malformed;
@@ -424,10 +435,12 @@ internal static class DeltaMergeSql
     /// quoted one never closes, or if a '"' sits directly after an identifier character, which is the
     /// string-prefix shape refused above.
     ///
-    /// A doubled '"' inside the delimiters is NOT read back as one character. It cannot name anything:
-    /// <see cref="RefuseUnquotableNames"/> has already refused every schema whose column names contain
-    /// a quote, so a word carrying one matches no column either way and falls through to the refusal at
-    /// the end of the scan.</summary>
+    /// A doubled '"' inside the delimiters is NOT read back as one character, and a word carrying one
+    /// is refused rather than resolved. On the SOURCE side that is already settled before the scan
+    /// runs — <see cref="RefuseUnquotableNames"/> refuses every write whose own column names contain a
+    /// quote — but on the TARGET side it is not, because that check never sees the table's columns.
+    /// The qualified-name branch of <see cref="Inspect"/> therefore rejects a quote-carrying name
+    /// itself, which is what makes "it cannot name anything" true of both sides.</summary>
     private static bool TryReadWord(string s, ref int i, out string word, out bool quoted)
     {
         word = string.Empty;

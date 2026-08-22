@@ -408,7 +408,11 @@ internal static class DeltaErrors
                       "complete boolean expression on its own", ex);
         }
 
-        if (raw.Contains(PartitionNullMarker, StringComparison.OrdinalIgnoreCase))
+        // Write operations only, both of these: each describes something the write was doing —
+        // putting a value into a partition column, creating a file for one — and neither sentence is
+        // true of a read that happens to meet the same wording. A read falls through to PZDL0201.
+        if (raw.Contains(PartitionNullMarker, StringComparison.OrdinalIgnoreCase)
+            && kind is not DeltaOperationKind.Read)
         {
             return Fail(UnusablePartitionValue,
                 $"the delta {operation} put an empty or null value in a partition column the table " +
@@ -419,7 +423,8 @@ internal static class DeltaErrors
                 "placeholder, or partition by a column that is never empty", ex);
         }
 
-        if (raw.Contains(NameTooLongMarker, StringComparison.OrdinalIgnoreCase))
+        if (raw.Contains(NameTooLongMarker, StringComparison.OrdinalIgnoreCase)
+            && kind is not DeltaOperationKind.Read)
         {
             // Deliberately no raw message: it is a full path, and the partition value is a segment of
             // it. Nothing here names a value.
@@ -447,8 +452,17 @@ internal static class DeltaErrors
         if (ConflictMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)) ||
             VersionAlreadyExists.IsMatch(raw))
         {
+            // A READ does not commit, so it cannot lose a commit race — but it meets the SAME markers,
+            // because another writer changing the table's metadata mid-read produces "metadata
+            // changed" from a reader as readily as from a writer. The classification is right for both
+            // (re-reading picks up the new version); only the sentence differs, and a read told it had
+            // lost a race it never entered is a message that sends its reader looking for a writer they
+            // do not have.
             return Transient(CommitConflict,
-                $"the delta {operation} lost a commit race against another writer ({raw})",
+                kind is DeltaOperationKind.Read
+                    ? $"the delta {operation} was overtaken by another writer committing to the table " +
+                      $"while it was being read ({raw})"
+                    : $"the delta {operation} lost a commit race against another writer ({raw})",
                 "no action needed if retries are configured; otherwise re-run", ex);
         }
 

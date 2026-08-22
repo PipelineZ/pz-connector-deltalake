@@ -10,20 +10,6 @@ namespace Pz.Connector.DeltaLake.Tests;
 /// <see cref="DeltaReader"/> carries the assertions that must run offline.</summary>
 internal static class DuckDbReader
 {
-    public static async Task<long> CountAsync(string location)
-    {
-        // A location with no transaction log is a table that was never created, which reads as zero
-        // rows here rather than as a delta_scan failure. The check is for the log specifically, not a
-        // blanket catch: a table that DOES exist and cannot be read must still fail loudly.
-        if (!Directory.Exists(Path.Combine(location, "_delta_log")))
-        {
-            return 0;
-        }
-
-        return Convert.ToInt64(await ScalarAsync($"select count(*) from delta_scan('{Quote(location)}')")
-            .ConfigureAwait(false));
-    }
-
     public static async Task<IReadOnlyList<(long Id, string Dt, double Amt)>> RowsAsync(string location)
     {
         using var conn = await OpenAsync().ConfigureAwait(false);
@@ -67,14 +53,6 @@ internal static class DuckDbReader
         }
 
         return rowset.Build() is { } batch ? [batch] : [];
-    }
-
-    public static async Task<object?> ScalarAsync(string sql)
-    {
-        using var conn = await OpenAsync().ConfigureAwait(false);
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
-        return await cmd.ExecuteScalarAsync().ConfigureAwait(false);
     }
 
     private static string Quote(string value) => value.Replace("'", "''", StringComparison.Ordinal);

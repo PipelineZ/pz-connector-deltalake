@@ -124,10 +124,11 @@ public class DeltaSecretSqlTests
     {
         // DuckDB's SCOPE match is a plain string prefix match, not path-boundary-aware — confirmed
         // against a real DuckDB 1.5.5: an unnormalized scope of "s3://data-lake" was also selected by
-        // which_secret() for the unrelated sibling "s3://data-lake-archive/...", reopening exactly the
-        // cross-wiring Finding 1 closed, just narrower (a shared string prefix instead of no scope at
-        // all). A trailing slash on the scope value is what excludes the sibling while still matching
-        // the root's own subpaths (confirmed: "s3://w/d/" still matched "s3://w/d/_delta_log/...").
+        // which_secret() for the unrelated sibling "s3://data-lake-archive/...", which is one
+        // connection's credential being used for another connection's root — the same cross-wiring a
+        // scope exists to prevent, narrowed to roots that share a string prefix. A trailing slash on
+        // the scope value is what excludes the sibling while still matching the root's own subpaths
+        // (confirmed: "s3://w/d/" still matched "s3://w/d/_delta_log/...").
         var sql = SoleSecret(DeltaSecretSql.SetupStatements(
             Cfg(("root", "s3://data-lake"), ("access_key_id", "AK"), ("secret_access_key", "SK")), "lake"));
 

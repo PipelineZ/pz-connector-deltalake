@@ -113,18 +113,23 @@ public class ValidationTests
     [Theory]
     [InlineData("data/{yyyy}/{MM}")]
     [InlineData("orders_{yyyy-MM-dd}")]
-    public void A_calendar_token_in_a_read_path_is_refused_by_the_dataset_schema(string path)
+    public void A_calendar_token_path_matches_the_pattern_the_dataset_schema_embeds(string path)
     {
-        // The connector declares PathTemplating for its SINK meaning only. Accepting a templated read
-        // path would silently reference a literal-token folder — the exact silent no-op the capability
-        // flag exists to prevent.
+        // The PATTERN only. Nothing here refuses anything: this is a bare .NET Regex against a literal,
+        // and the schema that acts on it is exercised by The_shipped_dataset_schema_rejects_... below.
+        // The name used to promise the refusal, which sent a reader looking for coverage that lives
+        // two tests further down.
+        //
+        // Why the pattern is worth pinning on its own: the connector declares PathTemplating for its
+        // SINK meaning only, so accepting a templated read path would silently reference a
+        // literal-token folder — the exact silent no-op the capability flag exists to prevent.
         Assert.Matches(DeltaLakeSchemas.CalendarTokenPattern, path);
     }
 
     [Theory]
     [InlineData("curated/orders")]
     [InlineData("orders")]
-    public void An_ordinary_read_path_is_not_mistaken_for_a_template(string path) =>
+    public void An_ordinary_read_path_does_not_match_the_calendar_token_pattern(string path) =>
         Assert.DoesNotMatch(DeltaLakeSchemas.CalendarTokenPattern, path);
 
     // The two theory tests above exercise CalendarTokenPattern as a bare .NET Regex -- they would

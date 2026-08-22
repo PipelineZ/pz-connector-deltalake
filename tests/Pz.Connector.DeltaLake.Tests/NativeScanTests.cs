@@ -72,8 +72,10 @@ public class NativeScanTests
     {
         var source = Open(("root", "s3://w/d"), ("access_key_id", "AK"), ("secret_access_key", "SUPERSECRET"));
         source.TryGetNativeScan(Spec(), out var scan);
+        // Mechanism is asserted EQUAL to the literal token, which already says it carries nothing
+        // else; a DoesNotContain on the same string afterwards could not fail. SqlFragment is the one
+        // that can: it is built from the location and the read options.
         Assert.Equal("delta_scan", scan!.Mechanism);
-        Assert.DoesNotContain("SUPERSECRET", scan.Mechanism);
         Assert.DoesNotContain("SUPERSECRET", scan.SqlFragment);
     }
 
@@ -86,10 +88,6 @@ public class NativeScanTests
         Assert.Contains("PZ0312", ex.Message);
         Assert.False(ex.IsTransient);
     }
-
-    [Fact]
-    public void The_connector_is_native_only_so_the_planner_refuses_force_universal_before_run_time() =>
-        Assert.IsAssignableFrom<INativeOnlySource>(new DeltaLakeConnector());
 
     [Fact]
     public void A_union_by_name_option_is_emitted_as_a_named_argument()
