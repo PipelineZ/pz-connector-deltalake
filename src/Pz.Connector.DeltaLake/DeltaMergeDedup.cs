@@ -224,9 +224,29 @@ internal static class DeltaMergeDedup
             // (unreachable pattern), which TreatWarningsAsErrors turns into a build failure.
             Decimal128Array a => Convert.ToHexString(a.GetBytes(row)),
             BooleanArray a => a.GetValue(row)!.Value,
-            Date32Array a => a.GetDateTime(row)!.Value,
-            Date64Array a => a.GetDateTime(row)!.Value,
-            TimestampArray a => a.GetTimestamp(row)!.Value,
+            // The RAW stored count, never a converted DateTime/DateTimeOffset — the same move the
+            // decimal arm above makes, for the same two reasons and both of them measured.
+            //
+            // It cannot throw. An Arrow DATE is a day count and an Arrow TIMESTAMP a unit count, both
+            // reaching far past DateTime's year 9999, and pz's own hub supports dates past it:
+            // measured against Apache.Arrow 23.0.0, Date32Array.GetDateTime throws
+            // ArgumentOutOfRangeException on 3_000_000, int.MaxValue and int.MinValue, and
+            // Date64Array.GetDateTime on long.MaxValue. LastWriterWins runs OUTSIDE MergeAsync's try,
+            // so that exception would escape CommitAsync carrying no PZDL#### at all.
+            //
+            // It cannot silently collide either, which is the half a guard could not have fixed.
+            // TimestampArray.GetTimestamp does not throw on an extreme value — it WRAPS: measured,
+            // long.MaxValue and long.MinValue microseconds both come back within a second of the
+            // epoch. Two distinct key values would then share one identity and LastWriterWins would
+            // drop the loser with nothing to report. The raw count is exact, so neither can happen.
+            //
+            // Comparing counts rather than calendar values changes no answer: within one column the
+            // unit is fixed, so two values are equal exactly when their counts are — the same equality
+            // DataFusion's ON clause applies. The boxes cannot meet across columns either, because a
+            // column has one type.
+            Date32Array a => a.GetValue(row)!.Value,
+            Date64Array a => a.GetValue(row)!.Value,
+            TimestampArray a => a.GetValue(row)!.Value,
             // Hex rather than the byte array itself: two equal byte arrays are different objects and
             // would compare unequal, which would leave every binary key looking distinct.
             //

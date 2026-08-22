@@ -96,6 +96,79 @@ public class MergeDedupKeyTypeTests
         Assert.DoesNotContain(batch, resolved);
     }
 
+    /// <summary>A date or timestamp key outside <see cref="DateTime"/>'s range resolves instead of
+    /// throwing — the same defect the decimal key above carries, in the arms next to it.
+    ///
+    /// An Arrow DATE is a day count and an Arrow TIMESTAMP a unit count, both reaching far past year
+    /// 9999, and pz's own hub supports dates past it, so this is a live shape. Reading one through
+    /// <c>GetDateTime</c> raises ArgumentOutOfRangeException from outside MergeAsync's try block, which
+    /// would escape CommitAsync as an uncoded exception: no PZDL####, no named cause, no next step.
+    ///
+    /// Each column repeats its first value in row 2 and carries a DIFFERENT out-of-range value in row
+    /// 1, so a resolver that collapsed every unrepresentable value onto one identity would leave one
+    /// row rather than two — which is how the timestamp arm failed. <c>GetTimestamp</c> does not throw
+    /// on an extreme value, it WRAPS: microseconds become ticks by an unchecked multiplication by ten,
+    /// so long.MinValue microseconds comes back as the epoch itself. Two distinct keys shared one
+    /// identity and the loser was dropped silently — a lost row with nothing to report, which is worse
+    /// than the date arms' uncoded throw.</summary>
+    public static TheoryData<string, IArrowType, IArrowArray> CalendarKeyColumnsBeyondDateTime()
+    {
+        var micros = new TimestampType(TimeUnit.Microsecond, "UTC");
+        return new TheoryData<string, IArrowType, IArrowArray>
+        {
+            {
+                "date32", Date32Type.Default,
+                new Date32Array(Fixed(Date32Type.Default, 3_000_000, int.MinValue, 3_000_000))
+            },
+            {
+                "date64", Date64Type.Default,
+                new Date64Array(Fixed(Date64Type.Default, long.MaxValue, long.MinValue, long.MaxValue))
+            },
+            {
+                // long.MinValue microseconds and 0 are the measured COLLISION: Apache.Arrow converts
+                // microseconds to ticks by multiplying by ten, unchecked, and -2^63 * 10 is exactly
+                // -5 * 2^64, so it wraps to the same tick count the epoch has. Two extreme values
+                // alone do not reproduce it -- long.MaxValue and long.MinValue land ten ticks apart
+                // and stay distinct, which is why this needs the epoch beside it.
+                "timestamp_us_utc", micros,
+                new TimestampArray(Fixed(micros, long.MinValue, 0L, long.MinValue))
+            },
+        };
+    }
+
+    /// <summary>A fixed-width primitive column assembled from its buffers. Apache.Arrow's own builders
+    /// for these three types take a DateTime/DateTimeOffset and so cannot express a value outside
+    /// DateTime's range at all — which is the whole point of the columns above.</summary>
+    private static ArrayData Fixed<T>(IArrowType type, params T[] values)
+        where T : struct
+    {
+        var buffer = new ArrowBuffer.Builder<T>();
+        foreach (var value in values)
+        {
+            buffer.Append(value);
+        }
+
+        return new ArrayData(
+            type, values.Length, nullCount: 0, offset: 0, buffers: [ArrowBuffer.Empty, buffer.Build()]);
+    }
+
+    [Theory]
+    [MemberData(nameof(CalendarKeyColumnsBeyondDateTime))]
+    public void A_calendar_key_outside_DateTimes_range_resolves_instead_of_throwing(
+        string name, IArrowType type, IArrowArray column)
+    {
+        var schema = new Schema([new Field("k", type, nullable: false)], null);
+        DeltaMergeDedup.AssertResolvableKeys(schema, ["k"], "out");
+
+        var batch = new RecordBatch(schema, [column], 3);
+        var resolved = DeltaMergeDedup.LastWriterWins([batch], ["k"]);
+
+        Assert.True(resolved.Sum(b => b.Length) == 2,
+            $"{name}: expected the repeated key to resolve to one row and the two distinct " +
+            $"out-of-range keys to stay apart, leaving 2 of 3");
+        Assert.DoesNotContain(batch, resolved);
+    }
+
     private static IArrowArray Decimals(Decimal128Type type, params BigInteger[] values)
     {
         var buffer = new ArrowBuffer.Builder<byte>();
