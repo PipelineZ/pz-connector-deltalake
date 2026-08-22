@@ -121,6 +121,26 @@ public class DeltaErrorsTests
         Assert.Contains("PZDL0401", ex.Message);
     }
 
+    // The rename refusal's own wording ends "...to opt out of support for concurrent writers", and
+    // "concurrent" is a bare conflict marker — so before PZDL0403 existed as a branch, this permanent
+    // misconfiguration was reported as a retryable commit race and the engine would have retried a run
+    // that can never succeed. Both messages below are literal delta-rs wording: the first is shipped
+    // verbatim in libdelta_rs_bridge.so, the second was reproduced against a real MinIO by setting
+    // AWS_CONDITIONAL_PUT=disabled (S3ConcurrencyTests pins that one end to end).
+    [Theory]
+    [InlineData("Atomic rename requires a LockClient for S3 backends. Either configure the LockClient, " +
+                "or set AWS_S3_ALLOW_UNSAFE_RENAME=true to opt out of support for concurrent writers.")]
+    [InlineData("Failed to read delta log object: Operation `put_opts` with mode `PutMode::Create` when " +
+                "conditional put is disabled not yet implemented by AmazonS3(bucket).")]
+    public void Translate_classifies_an_unsafe_s3_commit_path_as_permanent_not_a_commit_race(string message)
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "append", []);
+        Assert.Contains(DeltaErrors.UnsafeConcurrentS3, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(DeltaErrors.CommitConflict, ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsTransient);
+        Assert.Contains("AWS_S3_ALLOW_UNSAFE_RENAME", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Translate_classifies_an_unknown_delta_failure_as_permanent_not_transient()
     {

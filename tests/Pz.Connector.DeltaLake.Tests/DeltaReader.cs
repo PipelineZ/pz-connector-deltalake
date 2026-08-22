@@ -18,7 +18,12 @@ internal static class DeltaReader
     public static async Task<long> CountAsync(string location) =>
         (await RowsAsync(location).ConfigureAwait(false)).Count;
 
-    public static Task<IReadOnlyList<(long Id, string Dt, double Amt)>> RowsAsync(string location) =>
+    /// <summary>Reads a table, optionally through <paramref name="storage"/> — the delta-rs storage
+    /// options a remote root needs. Local roots pass nothing and are unaffected; an object-store root
+    /// cannot be opened at all without them, so a remote fact reads back through this rather than
+    /// through DuckDB and does not depend on an extension download.</summary>
+    public static Task<IReadOnlyList<(long Id, string Dt, double Amt)>> RowsAsync(
+        string location, IReadOnlyDictionary<string, string>? storage = null) =>
         DeltaBigStack.RunAsync(async () =>
         {
             // No ConfigureAwait(false) on this delegate's own awaits: DeltaBigStack pumps plain awaits
@@ -26,7 +31,7 @@ internal static class DeltaReader
             // default-stack pool thread. The enumeration is fully drained before returning, so no
             // delta-rs continuation outlives the delegate.
             using var engine = new DeltaEngine(EngineOptions.Default);
-            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            var table = await engine.LoadTableAsync(Options(location, storage), default);
             try
             {
                 var rows = new List<(long, string, double)>();
@@ -100,6 +105,13 @@ internal static class DeltaReader
                 }
             }
         });
+
+    private static TableOptions Options(string location, IReadOnlyDictionary<string, string>? storage) =>
+        new()
+        {
+            TableLocation = location,
+            StorageOptions = storage?.ToDictionary(kv => kv.Key, kv => kv.Value) ?? [],
+        };
 
     private static ArrowRowsetBuilder Declare(RecordBatch batch)
     {
@@ -175,11 +187,11 @@ internal static class DeltaReader
     /// in a string column — its tuple carries a non-nullable string. A null PARTITION value is
     /// legitimate and delta-rs returns it as a dictionary-encoded column with a null index, so a test
     /// that writes one has to count without reading.</summary>
-    public static Task<long> RowCountAsync(string location) =>
+    public static Task<long> RowCountAsync(string location, IReadOnlyDictionary<string, string>? storage = null) =>
         DeltaBigStack.RunAsync(async () =>
         {
             using var engine = new DeltaEngine(EngineOptions.Default);
-            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            var table = await engine.LoadTableAsync(Options(location, storage), default);
             try
             {
                 var count = 0L;

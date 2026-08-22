@@ -168,6 +168,26 @@ internal static class DeltaStorageOptions
         {
             options["AWS_ALLOW_HTTP"] = "true";
         }
+
+        // The commit mechanism, PINNED rather than inherited. Measured against delta-rs 0.33.0 and a
+        // real MinIO: a delta commit to an s3:// root is an object_store put with PutMode::Create -- a
+        // conditional PUT, keyed on If-None-Match -- and never a rename, which is why the LockClient /
+        // AWS_S3_ALLOW_UNSAFE_RENAME question this connector was built around has an answer of "neither
+        // is needed", and why neither is ever set.
+        //
+        // Set explicitly because that answer is a library DEFAULT, and a default is exactly the kind of
+        // thing a version bump moves. This option is provably read rather than plausibly read, which is
+        // the bar the rest of this file holds itself to: an unrecognized KEY is ignored silently by
+        // delta-rs, but an unrecognized VALUE is not -- "nonsense" fails the write with
+        // 'Failed to parse "nonsense" as S3PutConditional', and "disabled" fails it with
+        // 'Operation `put_opts` with mode `PutMode::Create` when conditional put is disabled', both
+        // measured. So a spelling that stopped working would announce itself.
+        //
+        // What this cannot pin is the STORE. A conditional PUT is only a guarantee where the endpoint
+        // enforces the precondition; against one that accepts the header and ignores it, concurrent
+        // commits overwrite each other and every writer reports success. That is measured, not
+        // hypothetical -- see docs/limitations.md.
+        options["AWS_CONDITIONAL_PUT"] = "etag";
     }
 
     private static void ApplyAzureOptions(Dictionary<string, string> options, ConnectorConfig config)
@@ -240,7 +260,21 @@ internal static class DeltaStorageOptions
         Put(options, "AZURE_STORAGE_ACCOUNT_NAME", fields.GetValueOrDefault("AccountName"));
         Put(options, "AZURE_STORAGE_ACCOUNT_KEY", fields.GetValueOrDefault("AccountKey"));
         Put(options, "AZURE_STORAGE_SAS_KEY", fields.GetValueOrDefault("SharedAccessSignature"));
-        Put(options, "AZURE_STORAGE_ENDPOINT", fields.GetValueOrDefault("BlobEndpoint"));
+
+        var endpoint = fields.GetValueOrDefault("BlobEndpoint");
+        Put(options, "AZURE_STORAGE_ENDPOINT", endpoint);
+
+        // object_store's Azure client refuses a plain-http endpoint unless allow_http is set, and the
+        // refusal names nothing a user can act on -- measured against a real http BlobEndpoint, every
+        // request fails with "Generic MicrosoftAzure error: ... HTTP error: builder error", which says
+        // neither "http" nor "endpoint". The S3 branch has the same knob under an explicit use_ssl:
+        // false; there is no such option on an azure root (validation refuses it -- PZDL0102), so the
+        // scheme the user already wrote into BlobEndpoint is what decides. https endpoints, which is
+        // every real Azure account, add nothing.
+        if (endpoint is not null && endpoint.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            options["AZURE_ALLOW_HTTP"] = "true";
+        }
     }
 
     private static void Put(Dictionary<string, string> options, string key, string? value)

@@ -64,6 +64,15 @@ internal static class DeltaErrors
     // Write, runtime.
     public const string CommitConflict = "PZDL0401";
     public const string DuplicateMergeKeys = "PZDL0402";
+    /// <summary>An S3 commit that could not be made safe against a second writer. delta-rs 0.33.0
+    /// commits to s3:// with a conditional PUT and never with a rename (measured — see
+    /// <see cref="DeltaStorageOptions"/>), so this is not reachable through the storage options this
+    /// connector builds; it is reachable through the ones a user's ENVIRONMENT contributes, and through
+    /// a future delta-rs whose default moves. It exists as a code of its own rather than as another
+    /// PZDL0404 because the alternative classification is worse than generic: the library's own
+    /// wording for the rename refusal says "concurrent writers", which the conflict markers below match
+    /// — so without this branch a permanent configuration error is reported as a retryable commit race
+    /// and the engine retries a run that can never succeed.</summary>
     public const string UnsafeConcurrentS3 = "PZDL0403";
     public const string WriteFailed = "PZDL0404";
 
@@ -96,6 +105,24 @@ internal static class DeltaErrors
         UnsafeConcurrentS3,
         WriteFailed, UnmatchableMergeKey, UnusablePartitionValue, UnsupportedProtocol,
     ];
+
+    /// <summary>Bare substrings identifying an S3 commit path that cannot be made safe. Both are
+    /// literal strings confirmed shipped in libdelta_rs_bridge.so and both were reproduced against a
+    /// real MinIO:
+    /// <list type="bullet">
+    /// <item><description>"requires a LockClient" is the tail of "Atomic rename requires a LockClient
+    /// for S3 backends. Either configure the LockClient, or set AWS_S3_ALLOW_UNSAFE_RENAME=true to opt
+    /// out of support for concurrent writers." — the rename path's refusal.</description></item>
+    /// <item><description>"conditional put is disabled" is object_store's refusal to perform the
+    /// PutMode::Create this connector's commits depend on; reproduced by setting
+    /// AWS_CONDITIONAL_PUT=disabled, which is the one way left to reach a commit path with no
+    /// concurrency guarantee at all.</description></item>
+    /// </list>
+    /// Matched BEFORE <see cref="ConflictMarkers"/>, and that order is load-bearing: the rename
+    /// refusal contains the word "concurrent", so the conflict branch would otherwise claim it and
+    /// report a permanent misconfiguration as a race worth retrying.</summary>
+    private static readonly string[] UnsafeS3CommitMarkers =
+        ["requires a lockclient", "conditional put is disabled"];
 
     /// <summary>Bare substrings that identify an optimistic-concurrency loss. "already exists" is
     /// deliberately absent: delta-rs uses that exact phrase both for a version-conflict retry AND for
@@ -321,6 +348,18 @@ internal static class DeltaErrors
                 "string can still exceed it",
                 "shorten the partition column in the pipeline SQL (hash or truncate it), partition by a " +
                 "narrower column, or write to a shorter root path. Object storage has no such limit", ex);
+        }
+
+        if (UnsafeS3CommitMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Fail(UnsafeConcurrentS3,
+                $"the delta {operation} could not commit through a mechanism that is safe against a " +
+                $"second writer, so nothing was written ({raw})",
+                "leave AWS_S3_ALLOW_UNSAFE_RENAME unset — it replaces this failure with commits that " +
+                "are silently overwritten — and remove any AWS_CONDITIONAL_PUT or " +
+                "AWS_S3_LOCKING_PROVIDER value in the environment. This connector commits with a " +
+                "conditional PUT, which needs no locking provider against an endpoint that supports " +
+                "one", ex);
         }
 
         if (ConflictMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)) ||

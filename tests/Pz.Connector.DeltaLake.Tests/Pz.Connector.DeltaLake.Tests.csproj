@@ -31,8 +31,15 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
-    <PackageReference Include="Testcontainers.Minio" Version="4.1.0" />
-    <PackageReference Include="Testcontainers.Azurite" Version="4.1.0" />
+    <!-- Object-store backends, test-only. The Testcontainers versions and the image tags the
+         suites pin match the ones pz's own S3/AzureBlob suites run against, so this connector is
+         measured on the same emulator builds the rest of the ecosystem is. AWSSDK.S3 and
+         Azure.Storage.Blobs exist here for ONE call each: creating the bucket and the blob
+         container, which neither delta-rs nor DuckDB can create for themselves. -->
+    <PackageReference Include="Testcontainers.Minio" Version="4.13.0" />
+    <PackageReference Include="Testcontainers.Azurite" Version="4.13.0" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.100.2" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.24.0" />
   </ItemGroup>
 
 </Project>
