@@ -1,0 +1,32 @@
+# Every place this project talks to. A connection is a place with credentials, an entity is a thing
+# in that place, and the direction is the function you call: source() reads, sink() writes.
+
+# The CSV this lake is seeded from. localfiles is builtin, so no package is declared for it, and its
+# relative path resolves against the project directory.
+seed:
+  connector: localfiles
+  entities:
+    orders:
+      read:
+        path: data/orders.csv
+        format: csv
+        columns:
+          id: bigint
+          dt: varchar
+          amount: double
+
+# The Delta lake itself: `root:` says where the place is, and each entity is a table under it.
+#
+# The root is an environment variable, not a relative path, and it has to be: pz hands a connector
+# no project-directory anchor (the `base_dir` option that lets localfiles resolve a relative path is
+# injected by the CLI for localfiles and sqlite by name), so a relative root would resolve against
+# whatever directory pz happened to be launched from. deltalake therefore requires an absolute local
+# path or an s3://-/az://-family URI and refuses anything else with PZDL0101 rather than guessing.
+lake:
+  connector: deltalake
+  root: ${DELTA_LAKE_ROOT}
+
+# Where the round-trip lands, so a reader (and the verify script) can check it.
+report:
+  connector: localfiles
+  root: out/report

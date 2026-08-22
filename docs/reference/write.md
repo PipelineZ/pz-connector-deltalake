@@ -162,6 +162,14 @@ The guard's authority is the table's own partition columns, not `partition_by`. 
 honoured only when the table is created, so a run against a table an earlier run partitioned need not
 declare it.
 
+### `partition_by:` cannot be declared through pz today
+
+pz reads `partition_by:` as ONE column whose value substitutes calendar tokens (`{yyyy}/{MM}/{dd}`)
+in the sink's `path:`, and refuses the option with `PZ0219` when the path carries no such tokens.
+Delta partitions declaratively by column value, with no templated path to route into, so a Delta
+table created through pz is **unpartitioned** — this option, and everything below that depends on it,
+is reachable only when the connector is driven directly. `installing.md` has the detail.
+
 ## `schema_policy: evolve`
 
 `evolve` means the same thing on every strategy — `append`, `replace` and `merge` alike: a column the
@@ -200,7 +208,8 @@ costs a table nobody can read.
 
 Merge cost follows the partitions the write touches, not the size of the table — *provided the
 partition columns are part of the join*, which is what happens whenever `partition_by` is a subset of
-`keys`.
+`keys`. Through pz that condition cannot be met at all, because `partition_by` cannot be declared
+(above); these figures describe the connector driven directly.
 
 Measured with `MergeCostBench` (delta-rs 0.33.0 via DeltaLake.Net, local filesystem, 200 partitions,
 1 000 source rows scattered across 5 of them, ids arranged so file statistics cannot prune on their

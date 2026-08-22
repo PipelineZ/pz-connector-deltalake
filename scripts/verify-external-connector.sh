@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# End-to-end proof that this connector is installable and runnable the way a stranger would use it:
+# pack -> local folder feed -> `pz restore` resolves it from that feed -> the connector ALC loads it
+# -> `pz run` moves real data through both directions -> `pz retry` reloads it after a failure.
+#
+# The chain this exercises has never carried a native package before: pz selects native assets by an
+# exact runtimes/<rid>/native/ prefix, materializes them, and resolves them through the connector
+# ALC's unmanaged-DLL hook. The native assertion below checks the ONE directory that hook probes,
+# not merely that the files exist somewhere under .pz/packages -- a library package's own native/
+# directory is never on the connector's probe path, so "present on disk" and "loadable" are
+# different questions and only the second one matters.
+#
+# NOT hermetic, unlike pz's own verify script: the local feed carries this connector, but `pz`,
+# DeltaLake.Net and DuckDB's `delta` extension are fetched from the network. A local-feed-only
+# configuration would fail on the first restore.
+#
+# Two feed mechanisms are in play and they are not the same one. `dotnet tool install` reads the
+# NuGet.Config written below; `pz restore` never reads NuGet.Config at all -- its feeds come from
+# --feeds, else PZ_FEEDS, else nuget.org -- so the local feed is passed to it explicitly.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_DIR="$(mktemp -d)"
+FEED_DIR="${WORK_DIR}/feed"
+TOOL_DIR="${WORK_DIR}/tool"
+PROJ_DIR="${WORK_DIR}/project"
+NUGET_CONFIG="${WORK_DIR}/nuget.config"
+# PZ_VERIFY_KEEP=1 leaves the work directory behind so a failure can be inspected rather than
+# reproduced from scratch; the default is to clean up.
+if [[ "${PZ_VERIFY_KEEP:-0}" == "1" ]]; then
+  trap 'echo "work dir kept: ${WORK_DIR}"' EXIT
+else
+  trap 'rm -rf "${WORK_DIR}"' EXIT
+fi
+
+mkdir -p "${FEED_DIR}" "${TOOL_DIR}"
+
+# A private, empty package cache: pz's content-addressed cache is per-user and shared across
+# projects, so reusing it would report a cache hit and measure a download of zero. Everything this
+# script reports about size is therefore a cold-cache number.
+export PZ_CACHE_DIR="${WORK_DIR}/cache"
+
+echo "== Pz.Connector.DeltaLake external-connector verification =="
+echo "work dir: ${WORK_DIR}"
+RID="$(dotnet --info | sed -n 's/^ *RID: *//p' | head -1)"
+echo "rid:      ${RID}"
+
+echo "-- Packing the connector to a local folder feed --"
+dotnet pack "${ROOT_DIR}/src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj" \
+  -c Release -o "${FEED_DIR}" --nologo -v quiet
+PKG="$(find "${FEED_DIR}" -maxdepth 1 -name 'Pz.Connector.DeltaLake.*.nupkg' | head -1)"
+[[ -n "${PKG}" ]] || { echo "FAIL: no nupkg produced" >&2; exit 1; }
+VERSION="$(basename "${PKG}" .nupkg | sed 's/^Pz\.Connector\.DeltaLake\.//')"
+echo "packed ${VERSION}"
+
+echo "-- Asserting the manifest is at the nupkg root --"
+unzip -l "${PKG}" | grep -q ' pz.connector.json$' || {
+  echo "FAIL: pz.connector.json is not at the nupkg root; the host cannot gate protocol compatibility" >&2
+  exit 1
+}
+
+echo "-- Writing a NuGet.Config listing the local feed FIRST, then nuget.org --"
+cat > "${NUGET_CONFIG}" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="local-feed" value="${FEED_DIR}" />
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+</configuration>
+EOF
+
+echo "-- Installing pz as a tool --"
+dotnet tool install pz --tool-path "${TOOL_DIR}" --configfile "${NUGET_CONFIG}"
+PZ="${TOOL_DIR}/pz"
+[[ -x "${PZ}" ]] || { echo "FAIL: no pz shim at ${PZ}" >&2; exit 1; }
+"${PZ}" --version
+
+echo "-- Copying the sample project and pinning the packed version --"
+cp -r "${ROOT_DIR}/samples/delta-roundtrip" "${PROJ_DIR}"
+# The committed sample pins the first tagged release, which does not exist until that tag does.
+# Rewrite it to what was just packed -- and fail loudly if the line it targets ever moves, rather
+# than restoring a version nobody built.
+sed -i "s/^    version: .*/    version: ${VERSION}/" "${PROJ_DIR}/project.yml"
+grep -q "^    version: ${VERSION}$" "${PROJ_DIR}/project.yml" || {
+  echo "FAIL: could not pin the connector version in project.yml" >&2; exit 1; }
+
+# deltalake roots must be absolute: pz gives a connector no project-directory anchor, so the sample
+# reads its root from the environment and the caller decides where the lake lives.
+export DELTA_LAKE_ROOT="${PROJ_DIR}/out/lake"
+
+echo "-- pz restore (expect a ~200 MB download; it looks hung and is not) --"
+(cd "${PROJ_DIR}" && "${PZ}" restore --feeds "${FEED_DIR}" --feeds "https://api.nuget.org/v3/index.json")
+
+echo "-- Asserting the lock file was written --"
+[[ -f "${PROJ_DIR}/pz.lock.json" ]] || { echo "FAIL: no pz.lock.json" >&2; exit 1; }
+
+# Measured here, before anything below stages a byte: these are what pz alone puts on disk.
+# -L because a library package is materialized as a symlink into the shared content-addressed cache,
+# so the apparent size of .pz/packages is otherwise a handful of link entries.
+CACHE_AFTER_RESTORE="$(du -sh "${PZ_CACHE_DIR}" | cut -f1)"
+PACKAGES_AFTER_RESTORE="$(du -shL "${PROJ_DIR}/.pz/packages" | cut -f1)"
+
+# What pz materialized has to be compared against something authoritative, and the authority on
+# which asset a net10.0/<rid> application needs is the .NET SDK itself. A publish of this very
+# project, restricted to this RID, resolves the nearest-TFM managed assemblies and the RID-correct
+# native libraries -- exactly the job pz's resolver does at restore time. Any difference is pz
+# selecting a different file from the same packages than the SDK does.
+DL_VERSION="$(sed -n 's/.*PackageReference Include="DeltaLake.Net" Version="\([^"]*\)".*/\1/p' \
+  "${ROOT_DIR}/src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj")"
+echo "-- Resolving the same assets through the .NET SDK, to compare pz's selection against --"
+SDK_ASSETS="${WORK_DIR}/sdk-assets"
+dotnet publish "${ROOT_DIR}/src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj" \
+  -c Release -r "${RID}" --self-contained false -o "${SDK_ASSETS}" --nologo -v quiet
+
+echo "-- Comparing pz's materialized package against it --"
+PKG_DIR="${PROJ_DIR}/.pz/packages"
+LIB_DIR="${PKG_DIR}/Pz.Connector.DeltaLake/${VERSION}/lib"
+PROBE_DIR="${PKG_DIR}/Pz.Connector.DeltaLake/${VERSION}/native"
+BRIDGED=0
+
+# (a) Managed assemblies. pz records lib assets in pz.lock.json as bare FILE NAMES and re-finds them
+#     in the archive under the prefix "lib/" alone, so on a multi-targeted package it extracts
+#     whichever target framework happens to come first in the zip.
+#
+#     Only DeltaLake.dll is CLASSIFIED as that defect here, and deliberately. A byte difference from
+#     the SDK's copy has a second, innocent cause: pz resolves a transitive dependency
+#     highest-version-wins where the SDK follows NuGet's minimum-version rule, so the two can be
+#     different package VERSIONS of the same assembly. Measured: pz takes Microsoft.Data.Analysis
+#     0.23.0 and extracts its lib/net8.0 build -- which IS the nearest target framework for a net10.0
+#     host, i.e. correct -- while the SDK takes 0.21.1's netstandard2.0 build. DeltaLake.Net is pinned
+#     to one version by this connector's own PackageReference, so for DeltaLake.dll the two sides
+#     agree on the version and any difference IS the target framework.
+BAD_DLLS=()
+VERSION_NOTES=0
+for dll in "${LIB_DIR}"/*.dll; do
+  name="$(basename "${dll}")"
+  # This connector's own assembly is built here, not resolved from a feed: the packed copy and the
+  # published copy are two builds of the same source and never compare equal. Nothing to learn.
+  [[ "${name}" == "Pz.Connector.DeltaLake.dll" ]] && continue
+  [[ -f "${SDK_ASSETS}/${name}" ]] || continue
+  cmp -s "${dll}" "${SDK_ASSETS}/${name}" && continue
+  if [[ "${name}" == "DeltaLake.dll" ]]; then
+    echo "  UPSTREAM GAP (pz finding 21): ${name} is not the build a net10.0 host needs." >&2
+    echo "    materialized: $(stat -Lc%s "${dll}") bytes (lib/net472 -- first 'lib/' entry in the zip)" >&2
+    echo "    SDK-resolved: $(stat -Lc%s "${SDK_ASSETS}/${name}") bytes (lib/net9.0)" >&2
+    echo "    cause: PackageMaterializer.ExtractInto resolves a lib asset by file name under the" >&2
+    echo "           prefix 'lib/', discarding the nearest target framework the resolver selected." >&2
+    echo "    bites as: MissingMethodException on the first delta-rs call -- the .NET Framework build" >&2
+    echo "           of the vendor assembly has a different API surface than the .NET 9 one." >&2
+    BAD_DLLS+=("${name}")
+    BRIDGED=1
+  else
+    echo "  note: ${name} differs from the SDK's copy; left as pz materialized it, not a finding." >&2
+    VERSION_NOTES=1
+  fi
+done
+
+if [[ "${VERSION_NOTES}" == "1" ]]; then
+  echo "  Those notes are pz resolving a different package VERSION than the SDK does" >&2
+  echo "  (highest-version-wins against NuGet's minimum-version rule), not a different target" >&2
+  echo "  framework: within the versions pz chose it extracted Microsoft.Data.Analysis 0.23.0's" >&2
+  echo "  lib/net8.0 (the nearer of net8.0 and netstandard2.0) and Microsoft.ML.DataView 5.0.0's" >&2
+  echo "  lib/netstandard2.0 (its only one). Both correct. Only DeltaLake.Net multi-targets in a" >&2
+  echo "  way that puts a net4x build first in the zip." >&2
+fi
+
+# (b) Native libraries: right file, right place. ConnectorLoadContext.LoadUnmanagedDll probes
+#     <package>/native/ and nowhere else, and the RID story repeats the TFM one one directory over.
+for lib in libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
+  [[ -f "${SDK_ASSETS}/${lib}" ]] || {
+    echo "FAIL: DeltaLake.Net ships no ${lib} for ${RID}; this host's RID is not one it supports." >&2
+    exit 1; }
+
+  # -L because a library package is materialized as a symlink into the content-addressed cache.
+  staged="$(find -L "${PKG_DIR}" -name "${lib}" | head -1)"
+  [[ -n "${staged}" ]] || {
+    echo "FAIL: ${lib} was not materialized anywhere under .pz/packages." >&2
+    echo "      pz selects native assets by an exact runtimes/<rid>/native/ prefix with no RID-graph" >&2
+    echo "      fallback; check that this host's RID matches one DeltaLake.Net ships." >&2
+    exit 1; }
+
+  if ! cmp -s "${staged}" "${SDK_ASSETS}/${lib}"; then
+    echo "  UPSTREAM GAP (pz finding 20): the materialized ${lib} is not this host's build." >&2
+    echo "    materialized: ${staged#"${PROJ_DIR}/"} ($(stat -Lc%s "${staged}") bytes)" >&2
+    echo "    SDK-resolved: ${RID} ($(stat -Lc%s "${SDK_ASSETS}/${lib}") bytes)" >&2
+    echo "    cause: PackageMaterializer.ExtractInto resolves a native asset by file name under the" >&2
+    echo "           prefix 'runtimes/', discarding the RID the resolver already selected." >&2
+    BRIDGED=1
+  fi
+
+  if [[ ! -f "${PROBE_DIR}/${lib}" ]]; then
+    echo "  UPSTREAM GAP (pz finding 19): ${lib} is not on the connector's probe path." >&2
+    echo "    probed:  .pz/packages/Pz.Connector.DeltaLake/${VERSION}/native/${lib} (absent)" >&2
+    echo "    present: ${staged#"${PROJ_DIR}/"}" >&2
+    echo "    cause: PackageMaterializer flattens a transitive package's lib/ into the connector" >&2
+    echo "           package's own lib/, but never its native/." >&2
+    BRIDGED=1
+  fi
+done
+
+if [[ "${BRIDGED}" == "1" ]]; then
+  if [[ "${PZ_VERIFY_STRICT:-0}" == "1" ]]; then
+    echo "FAIL: PZ_VERIFY_STRICT=1 and pz's materialized package is wrong (see the gaps above)." >&2
+    exit 1
+  fi
+  # Deliberate, loud scaffolding for pz defects, NOT a fix. Everything below this line -- the ALC
+  # load, the native P/Invoke through its unmanaged-DLL hook, the run, the retry -- is what those
+  # gaps stop pz reaching on its own, and staging the SDK-resolved assets where pz should have put
+  # them is the only way to test any of it. Only files pz already materialized WRONGLY are replaced,
+  # and only the two native libraries are added, so a dependency pz fails to materialize at all
+  # still surfaces as a failure below rather than being papered over. Delete this block, and run
+  # with PZ_VERIFY_STRICT=1, the day pz materializes a connector package correctly.
+  echo "  Bridging so the REST of the chain can still be tested. This is scaffolding: through pz"
+  echo "  alone, this connector does not load. See docs/installing.md."
+  for name in ${BAD_DLLS[@]+"${BAD_DLLS[@]}"}; do
+    cp "${SDK_ASSETS}/${name}" "${LIB_DIR}/${name}"
+  done
+  mkdir -p "${PROBE_DIR}"
+  cp "${SDK_ASSETS}/libdelta_rs_bridge.so" "${SDK_ASSETS}/libdelta_kernel_ffi.so" "${PROBE_DIR}/"
+fi
+
+for lib in libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
+  [[ -f "${PROBE_DIR}/${lib}" ]] || { echo "FAIL: ${lib} still absent from the probe path" >&2; exit 1; }
+  echo "  native/${lib} ($(stat -Lc%s "${PROBE_DIR}/${lib}") bytes)"
+done
+
+# The lake is a store, not a DAG edge: nothing connects the pipeline that writes it to the pipeline
+# that reads it back, so the two are independent flows and their order is the caller's to choose.
+echo "-- pz run orders_delta (seed CSV -> Delta table, strategy: merge) --"
+(cd "${PROJ_DIR}" && "${PZ}" run orders_delta)
+
+echo "-- pz run orders_report (Delta table -> CSV, through delta_scan) --"
+(cd "${PROJ_DIR}" && "${PZ}" run orders_report)
+
+echo "-- Asserting the delta table and the round-tripped report both exist --"
+[[ -d "${PROJ_DIR}/out/lake/orders/_delta_log" ]] || { echo "FAIL: no _delta_log" >&2; exit 1; }
+REPORT="$(find "${PROJ_DIR}/out/report" -name '*.csv' | head -1)"
+[[ -n "${REPORT}" ]] || { echo "FAIL: no report csv" >&2; exit 1; }
+ROWS="$(($(wc -l < "${REPORT}") - 1))"
+[[ "${ROWS}" -eq 3 ]] || { echo "FAIL: report has ${ROWS} rows, expected 3" >&2; cat "${REPORT}" >&2; exit 1; }
+echo "report (${ROWS} rows):"
+sed 's/^/  /' "${REPORT}"
+
+echo "-- Asserting a second restore is byte-identical (determinism) --"
+cp "${PROJ_DIR}/pz.lock.json" "${WORK_DIR}/lock.first"
+(cd "${PROJ_DIR}" && "${PZ}" restore --feeds "${FEED_DIR}" --feeds "https://api.nuget.org/v3/index.json")
+diff -q "${WORK_DIR}/lock.first" "${PROJ_DIR}/pz.lock.json" || {
+  echo "FAIL: pz.lock.json changed on a second restore" >&2; exit 1; }
+
+# Native libraries are never unloaded once loaded into a process, and pz gives each connector package
+# a collectible AssemblyLoadContext. `pz retry` is the command a user reaches for right after a
+# failure, and it loads the connector again -- so a delta-rs-carrying ALC that could not be reloaded
+# would fail exactly there. The failure is injected, not simulated: a regular file where the report
+# sink needs a directory makes the SinkWrite fail with the Delta SourceLoad already succeeded, which
+# is the shape retry has to reuse.
+echo "-- Injecting a SinkWrite failure downstream of the Delta read --"
+rm -rf "${PROJ_DIR}/out/report"
+: > "${PROJ_DIR}/out/report"
+if (cd "${PROJ_DIR}" && "${PZ}" run orders_report); then
+  echo "FAIL: the injected failure did not fail the run" >&2; exit 1
+fi
+
+echo "-- pz retry: the connector ALC loads again, carrying both Rust libraries --"
+rm -f "${PROJ_DIR}/out/report"
+(cd "${PROJ_DIR}" && "${PZ}" retry)
+
+echo "-- Asserting the retry reused the Delta SourceLoad rather than re-extracting --"
+RESULTS="$(find "${PROJ_DIR}/.pz/runs" -name run_results.json -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+[[ -n "${RESULTS}" ]] || { echo "FAIL: no run_results.json from the retry" >&2; exit 1; }
+grep -q '"provenance": *"reused"' "${RESULTS}" || {
+  echo "FAIL: the retry re-extracted from the Delta table instead of reusing the staged load" >&2
+  echo "      (no node in ${RESULTS} carries provenance \"reused\")" >&2
+  exit 1
+}
+REPORT="$(find "${PROJ_DIR}/out/report" -name '*.csv' | head -1)"
+[[ -n "${REPORT}" ]] || { echo "FAIL: the retry produced no report csv" >&2; exit 1; }
+
+echo
+echo "-- What the dependency costs (cold cache, measured, not predicted) --"
+GLOBAL_PACKAGES="$(dotnet nuget locals global-packages --list | sed 's/^[^:]*: *//')"
+VENDOR_NUPKG="${GLOBAL_PACKAGES}/deltalake.net/${DL_VERSION}/deltalake.net.${DL_VERSION}.nupkg"
+echo "  this connector's nupkg:             $(du -h "${PKG}" | cut -f1)"
+if [[ -f "${VENDOR_NUPKG}" ]]; then
+  echo "  DeltaLake.Net ${DL_VERSION} nupkg (all RIDs):  $(du -h "${VENDOR_NUPKG}" | cut -f1)  <- the download"
+fi
+echo "  pz package cache after restore:     ${CACHE_AFTER_RESTORE}"
+echo "  .pz/packages after restore:         ${PACKAGES_AFTER_RESTORE}"
+echo "  .pz/packages after bridging:        $(du -shL "${PROJ_DIR}/.pz/packages" | cut -f1)"
+echo "  the ${RID} native pair alone:  $(du -ch "${SDK_ASSETS}"/*.so | tail -1 | cut -f1)"
+echo "  (a cache holding the RID-correct natives instead of the wrong ones would differ; today's"
+echo "   cache number is what pz actually produced, wrong architecture included.)"
+
+echo
+if [[ "${BRIDGED}" == "1" ]]; then
+  echo "PASS, WITH THE ASSET CHAIN BRIDGED: everything downstream of package materialization works"
+  echo "end to end, and package materialization itself does not (pz findings 19, 20 and 21 above)."
+  echo "Do not read this green line as 'the external-connector path works' -- it does not yet."
+else
+  echo "PASS: the external-connector path works end to end."
+fi

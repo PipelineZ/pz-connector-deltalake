@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # MinVer reads tag history; a shallow clone versions everything 0.0.0-alpha.0.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
+      # Ubuntu only, and that is a coverage statement, not a convenience. The object-store suites are
+      # Testcontainers over MinIO and Azurite -- Linux images a Windows runner cannot pull -- and
+      # DeltaLake.Net ships no win-arm64 native at all. A Windows leg could therefore only ever be
+      # build-only; docs/compatibility.md says which platforms are TESTED versus merely shipped, and
+      # adding a leg here without updating that table would make it lie.
+      #
+      # No PZ_TESTS_OFFLINE here, unlike pz's own CI. That variable skips 55 of the 634 tests --
+      # every DuckDB-extension read-back and every Testcontainers suite -- and this workflow already
+      # needs the network for the verify job below, so buying hermeticity in this job would cost
+      # real coverage and buy nothing at the workflow level. `PZ_TESTS_OFFLINE=1 dotnet test` is
+      # still the supported way to run the hermetic subset on a machine with no network.
+      #
+      # --blame-hang so a stall names itself rather than burning the job timeout in silence. This
+      # suite drives two Rust libraries through P/Invoke, where a hang is a plausible failure mode
+      # and a silent one.
+      - run: >
+          dotnet test Pz.Connector.DeltaLake.slnx -c Release --no-build
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+
+  # The other half of the proof: that a stranger can declare this connector by package id, run
+  # `pz restore`, and have it work. It is a separate job because it is a separate risk -- the suite
+  # above never touches pz's resolver, package materializer, or connector load context, and this
+  # connector is the first thing to carry a native package through any of them.
+  #
+  # This job is EXPECTED to report upstream gaps and still pass: against pz 0.2.2 the materialized
+  # package is not loadable, the script says so loudly, stages the correct assets, and verifies
+  # everything downstream. Setting PZ_VERIFY_STRICT=1 makes those gaps fail the job instead -- flip
+  # it, and delete the script's bridging block, the day pz materializes a connector package
+  # correctly. Until then a green tick here does NOT mean the install path works; read the log.
+  verify-external-connector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40 # the DeltaLake.Net download alone is 222 MB on a cold cache.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the script packs, and MinVer needs the history to version what it packs.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: scripts/verify-external-connector.sh

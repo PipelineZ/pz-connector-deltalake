@@ -1,0 +1,53 @@
+# NuGet trusted publishing (OIDC) -- no long-lived API key is stored in this repository.
+# MANUAL PREREQUISITES (one-time):
+#   1. On nuget.org (https://www.nuget.org/account/trustedpublishing -> Add policy), create a trusted
+#      publishing policy naming this repository's owner/name, this exact workflow filename
+#      ("release.yml", no path), and environment "release". Scope it to the package id
+#      "Pz.Connector.DeltaLake" with the "Push new packages and package versions" scope -- not
+#      "push only new package versions", which cannot create an id that does not exist yet.
+#   2. Create a GitHub Environment named "release" and add an environment secret NUGET_USER = the
+#      nuget.org profile NAME (not email) of the account owning that policy.
+# Until that setup exists a real `v*` tag push fails at the NuGet/login step with an authentication
+# error. That failure is expected and is not a workflow bug.
+#
+# Tag-triggered only, never on a push to main: MinVer would otherwise produce a height-based
+# prerelease on every commit and publish a new version per merge.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release # scopes NUGET_USER to this job, and supports required-reviewer gating.
+    permissions:
+      contents: read
+      id-token: write # required for NuGet/login's OIDC exchange.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # MinVer computes the release version from this tag plus history.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
+      # The same invocation ci.yml's ubuntu leg runs, deliberately. Releasing is not the moment to
+      # widen coverage past what merge already proved on this commit.
+      - run: >
+          dotnet test Pz.Connector.DeltaLake.slnx -c Release --no-build
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      - run: dotnet pack src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj -c Release -o packages --no-build
+      - name: NuGet login (trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }} # nuget.org profile name, NOT email -- see prerequisites.
+      - name: Push the package to nuget.org
+        run: >
+          dotnet nuget push 'packages/*.nupkg'
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --skip-duplicate

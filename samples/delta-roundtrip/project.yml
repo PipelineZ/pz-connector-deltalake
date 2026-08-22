@@ -1,0 +1,13 @@
+name: delta_roundtrip
+version: 0.1.0
+
+# The connector is declared by package id and version, exactly as a stranger would declare it.
+# `pz restore` resolves this against the host feeds (--feeds, else PZ_FEEDS, else nuget.org) and
+# materializes it under .pz/packages; localfiles needs no declaration because it is builtin.
+#
+# 0.1.0 is this connector's first tagged release. Until that tag exists there is nothing on
+# nuget.org under this id, so `scripts/verify-external-connector.sh` rewrites this line to the
+# version it just packed. See README.md.
+connectors:
+  - package: Pz.Connector.DeltaLake
+    version: 0.1.0
