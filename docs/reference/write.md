@@ -194,18 +194,25 @@ protects, so it is not done.
 Independent of strategy — `append`, `replace` and `merge` alike — `PZDL0406` reports a partition value
 this connector will not write:
 
-- **An empty value in any partition column.** Refused before the batch is buffered. Delta writes a
-  partition value into a directory name, and an empty value produces `col=`, which it cannot tell from
-  a null. On a *nullable* partition column delta-rs therefore accepts the write and the rows read back
-  with **null** in that column — a silent change to your data, with no error anywhere; on a `NOT NULL`
-  one it fails the insert, but only after the table exists and after any generation an append already
-  flushed has committed. Both string and binary columns are affected, and both are refused. A genuine
-  null is *not* refused: a null written is a null read back.
+- **An empty value in any partition column.** Refused before the batch is buffered. An empty
+  partition value does not survive the round trip: on a *nullable* partition column the write is
+  accepted and the rows read back with **null** in that column — a silent change to your data, with
+  no error anywhere — and on a `NOT NULL` one delta-rs refuses the write for holding a null it never
+  wrote, but only after the table exists and after any generation an append already flushed has
+  committed. Both string and binary columns are affected, and both are refused. A genuine null is
+  *not* refused: a null written is a null read back.
+
+  The mechanism is not the one usually given. On disk and in the log the two are **distinct** —
+  measured: an empty value lands in `dt=` with `"partitionValues":{"dt":""}`, a null in
+  `dt=__HIVE_DEFAULT_PARTITION__` with `{"dt":null}`. The value is lost when the column is
+  reconstructed on the READ, and by both delta-rs and DuckDB's `delta` extension alike.
 - **A value whose directory name exceeds the filesystem's path-component limit** (255 bytes on the
-  common local filesystems; object storage has no such limit). The value is percent-escaped on the way
-  in, so a shorter string can still exceed it. **Not a pre-flight refusal**, unlike the bullet above:
-  it is delta-rs failing to create a file, surfaced when it happens — measured, `WriteBatchAsync`
-  succeeds and the error comes out of `CommitAsync`.
+  common local filesystems; object storage has no such limit). A partition value is percent-escaped
+  into its directory name, and every escaped byte costs three — measured: `a/b` becomes `dt=a%2Fb`,
+  `café` becomes `dt=caf%C3%A9`, and a 90-character value of spaces is 90 bytes of UTF-8 and 270 once
+  escaped, which is refused although the value is a third of the cap. **Not a pre-flight refusal**,
+  unlike the bullet above: it is delta-rs failing to create a file, surfaced when it happens —
+  measured, `WriteBatchAsync` succeeds and the error comes out of `CommitAsync`.
 
 Every offending column is named in one message; the messages name columns and never values.
 

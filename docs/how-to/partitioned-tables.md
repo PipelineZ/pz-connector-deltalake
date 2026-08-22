@@ -57,16 +57,23 @@ as a write option, alongside `strategy` and `keys`. Two rules:
 **PZDL0406** covers two causes, on `append`, `replace` and `merge` alike — and they are caught at
 **different times**, which decides what state your table is in afterwards.
 
-**An empty value is refused before the batch is buffered.** Nothing is written. A partition value
-becomes a directory name, and `col=` is what an empty string produces *and* what a null produces. On
-a nullable partition column delta-rs accepts such a write and the rows read back with **null** — a
-silent change to your data — so this one is checked per batch, up front, rather than translated from
-a failure that never comes. Both string and binary columns are affected. A genuine null is not
-refused: a null written is a null read back.
+**An empty value is refused before the batch is buffered.** Nothing is written. An empty partition
+value does not survive the round trip: on a nullable partition column the write is accepted and the
+rows read back with **null** — a silent change to your data — so this one is checked per batch, up
+front, rather than translated from a failure that never comes. Both string and binary columns are
+affected. A genuine null is not refused: a null written is a null read back.
+
+Measured, and not for the reason usually given: an empty value and a null land in *different*
+directories (`dt=` against `dt=__HIVE_DEFAULT_PARTITION__`) and are recorded distinctly in the log.
+The value is lost when the column is reconstructed on the read — by delta-rs and by DuckDB's `delta`
+extension alike, which is what makes it a property of the format rather than one engine's bug.
+[../delta-lake-primer.md](../delta-lake-primer.md) has the full table.
 
 **A value too long for the filesystem is a run-time failure, not a pre-flight refusal.** The cap is
-255 bytes on the common local filesystems (object storage has no such limit), and the value is
-percent-escaped on the way in, so a shorter string can still exceed it. This one cannot be caught
+255 bytes on the common local filesystems (object storage has no such limit) and it applies to the
+**escaped** name: a partition value is percent-escaped into its directory name, and every escaped
+byte costs three. Measured — a 90-character value of spaces is 90 bytes of UTF-8 and 270 once
+escaped, and is refused although the value itself is a third of the cap. This one cannot be caught
 before the write: it is delta-rs failing to create a file, translated when it surfaces. Measured —
 `MergeErrorTests.A_partition_value_too_long_for_the_filesystem_is_reported_without_the_value` hands
 over a 300-character value, `WriteBatchAsync` **succeeds**, and the error is thrown out of

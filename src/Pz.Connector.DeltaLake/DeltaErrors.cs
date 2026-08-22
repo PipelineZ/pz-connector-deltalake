@@ -94,14 +94,22 @@ internal static class DeltaErrors
     public const string UnmatchableMergeKey = "PZDL0405";
 
     /// <summary>A partition value this write cannot store. A partition value is not ordinary data: it
-    /// becomes a directory name, so it inherits that layer's limits — a path-component length cap, and
-    /// Delta's own inability to tell an empty partition value from a null one.
+    /// becomes a directory name, so it inherits that layer's limits — a path-component length cap (the
+    /// value is percent-escaped on the way in, measured, so escaping alone can push a short value past
+    /// it) — and an empty value is treated as a null everywhere it matters.
+    ///
+    /// Measured, and NOT by the directory name being ambiguous: delta-rs writes 'dt=' for an empty
+    /// string and 'dt=__HIVE_DEFAULT_PARTITION__' for a null, and records "" against null in the log,
+    /// so on disk the two are distinct. The value is lost elsewhere — on a NULLABLE column both
+    /// delta-rs and DuckDB reconstruct the column with a NULL where the empty value was, and on a
+    /// NOT NULL column delta-rs refuses the write for holding a null it never wrote. PartitionValueEncodingTests
+    /// pins both halves.
     ///
     /// Raised from two places, deliberately. An EMPTY value is refused pre-flight, per batch, by
-    /// DeltaWriteSession: on a nullable partition column delta-rs accepts it and silently stores a null,
-    /// so there is no failure to translate and no other point at which it can be caught. Everything
-    /// else — an empty or null value in a NOT NULL partition column, a name too long for the
-    /// filesystem — is a real delta-rs failure and is translated below.</summary>
+    /// DeltaWriteSession: on a nullable partition column delta-rs accepts it and the null appears only
+    /// on the way out, so there is no failure to translate and no other point at which it can be
+    /// caught. Everything else — an empty or null value in a NOT NULL partition column, a name too
+    /// long for the filesystem — is a real delta-rs failure and is translated below.</summary>
     public const string UnusablePartitionValue = "PZDL0406";
 
     public static readonly IReadOnlyList<string> AllCodes =
@@ -404,8 +412,9 @@ internal static class DeltaErrors
         {
             return Fail(UnusablePartitionValue,
                 $"the delta {operation} put an empty or null value in a partition column the table " +
-                "declares NOT NULL. Delta encodes a partition value into a directory name, where an " +
-                $"empty string and a null are the same thing, so neither can be stored there ({raw})",
+                "declares NOT NULL. Delta encodes a partition value into a directory name, and an " +
+                "empty value is treated as a null on the way in — so a NOT NULL partition column " +
+                $"accepts neither ({raw})",
                 "filter those rows out in the pipeline SQL, coalesce the column to a non-empty " +
                 "placeholder, or partition by a column that is never empty", ex);
         }

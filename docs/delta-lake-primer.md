@@ -270,13 +270,73 @@ Three practical consequences:
   decide which ones to skip; it reads `partitionValues` out of the log. This is why joining on the
   partition column is the biggest single lever on merge cost — measured at **19–39×** in
   [reference/write.md](reference/write.md).
-- **A partition value is a directory name, and inherits that layer's limits.** A component longer than
-  the filesystem allows (255 bytes on the common local filesystems) fails, and the value is
-  percent-escaped on the way in, so a shorter string can still exceed it.
-- **An empty partition value is indistinguishable from a null.** `dt=` is what an empty string
-  produces, and it is what a null produces. Written to a nullable partition column, empty strings
-  read back as **null** with no error anywhere. This connector refuses that write outright
-  (PZDL0406) rather than let it change your data quietly.
+- **A partition value is a directory name, and inherits that layer's limits** — including a length
+  cap it can hit sooner than you expect. See below.
+- **An empty partition value comes back as null.** See below.
+
+### How a partition value becomes a directory name
+
+A directory name cannot hold arbitrary bytes — most obviously it cannot hold a `/` — so the value is
+**percent-escaped** on the way in. Measured, writing each of these through this connector to a local
+table partitioned by `dt`:
+
+| value written | directory on disk |
+|---|---|
+| `abc` | `dt=abc` |
+| `a b` | `dt=a%20b` |
+| `a/b` | `dt=a%2Fb` |
+| `a%b` | `dt=a%25b` |
+| `a=b` | `dt=a%3Db` |
+| `café` | `dt=caf%C3%A9` |
+| `日本` | `dt=%E6%97%A5%E6%9C%AC` |
+| `😀` | `dt=%F0%9F%98%80` |
+
+Four things fall out of that table, and each one bites somebody:
+
+- **`a/b` is one directory, not two.** The slash is escaped, so a value containing a path separator
+  does not nest.
+- **The escape character escapes itself.** `a%b` becomes `a%25b`, so a value that already looks
+  percent-encoded is not decoded on the way out.
+- **The name can be three times the value.** Every escaped byte costs three, and non-ASCII text is
+  multi-byte before it is escaped at all. The cap is on the *escaped* name — 255 bytes on the common
+  local filesystems, no limit on object storage — so a short value can still exceed it. Measured: a
+  90-character value of spaces is 90 bytes of UTF-8 and **270** once escaped, and the write is
+  refused (PZDL0406). Nothing but the escaping put it over.
+- **The escaping is a rendering, not a change to your data.** The log records the value verbatim
+  (`"partitionValues":{"dt":"a/b"}`), and both delta-rs and DuckDB hand every one of the values above
+  back byte-identical.
+
+One more layer, worth knowing if you ever read a commit file by hand: the `add` action's `path` is
+**itself** URI-encoded, on top of the escaping already in the directory name. The value `a/b` lands
+in `dt=a%2Fb/` on disk and is recorded as `"path":"dt=a%252Fb/part-…"` in the log. That is the
+protocol's rule — `add.path` is a URI a reader must decode — and decoding it once gets you the
+directory name, not the value. This connector never parses the log, which is one fewer place to get
+that wrong.
+
+### An empty partition value comes back as null
+
+Write an empty string into a partition column and the rows read back with **null** in it. No error,
+no warning — your data changed. This connector refuses such a write outright (**PZDL0406**) rather
+than let that happen quietly.
+
+The usual explanation for it is wrong, and the real one is worth two minutes because it tells you
+where else to look. On disk and in the log, an empty value and a null are **distinct**:
+
+| written | directory on disk | recorded in the log |
+|---|---|---|
+| `""` | `dt=` | `"partitionValues":{"dt":""}` |
+| null | `dt=__HIVE_DEFAULT_PARTITION__` | `"partitionValues":{"dt":null}` |
+| `"x"` | `dt=x` | `"partitionValues":{"dt":"x"}` |
+
+So the directory name is not ambiguous and the log is not lossy. The value is lost when the column is
+**reconstructed on the read** — and by both engines: delta-rs and DuckDB's `delta` extension each
+return null for the empty value and null for the null. Two independent implementations agreeing is
+what makes this a property of the format rather than a bug in one of them.
+
+The other half fails loudly instead. On a partition column declared `NOT NULL`, delta-rs refuses the
+write for holding a null it never wrote — the empty value arrives as a null in the partition values
+it converts. So "an empty partition value behaves as a null" is right about the outcome on both
+paths; only the story about the directory name was wrong.
 
 ### An overwrite is total, not per-partition
 

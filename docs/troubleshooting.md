@@ -295,11 +295,19 @@ sitting in the table that no incoming row touches is outside its reach.
 **Symptom.** "partition column(s) 'x' contain an empty value", or "could not create a file because one
 component of its path was longer than this filesystem allows".
 
-**Cause.** A partition value becomes a directory name. `col=` is what an empty string produces and
-what a null produces, so Delta cannot tell them apart: on a nullable partition column the write is
-accepted and the rows read back as **null**. And a path component has a length cap — 255 bytes on the
-common local filesystems; the value is percent-escaped on the way in, so a shorter string can still
-exceed it. Object storage has no such limit.
+**Cause.** A partition value becomes a directory name, percent-escaped on the way in.
+
+An **empty value** does not survive that round trip: on a nullable partition column the write is
+accepted and the rows read back as **null**, and on a `NOT NULL` one delta-rs refuses the write for
+holding a null it never wrote. Measured, the directory name is not what loses it — an empty value
+lands in `dt=` and a null in `dt=__HIVE_DEFAULT_PARTITION__`, and the log records `""` against
+`null` — the value is lost when the column is reconstructed on the read, by delta-rs and DuckDB
+alike.
+
+A **too-long value** hits the path-component cap: 255 bytes on the common local filesystems, none on
+object storage. The cap applies to the ESCAPED name, and every escaped byte costs three — measured, a
+90-character value of spaces is 90 bytes of UTF-8 and 270 once escaped, so a value a third of the cap
+is still refused.
 
 **When each is caught.** The empty value is refused **before the batch is buffered**, so nothing is
 written. The length case cannot be: it is delta-rs failing to create a file, and it surfaces at the

@@ -473,12 +473,18 @@ internal sealed class DeltaWriteSession(
 
     /// <summary>Refuses a batch carrying an empty value in a partition column, on EVERY strategy.
     ///
-    /// Measured against real delta-rs: Delta writes a partition value into a directory name, and an
-    /// empty value produces the directory <c>col=</c>, which it cannot tell from a null. On a NULLABLE
-    /// partition column the write therefore SUCCEEDS and the row reads back with null in that column —
+    /// Measured against real delta-rs: an empty partition value does not survive the round trip. On a
+    /// NULLABLE partition column the write SUCCEEDS and the row reads back with null in that column —
     /// a silent change to the user's data, on the plainest append there is, with no error anywhere. On a
-    /// NOT NULL one delta-rs fails the insert instead, but only after the table exists and after any
-    /// generation an append already flushed has committed.
+    /// NOT NULL one delta-rs fails the insert instead, for holding a null it never wrote, but only
+    /// after the table exists and after any generation an append already flushed has committed.
+    ///
+    /// NOT because the directory name is ambiguous, which is the obvious guess and is wrong: delta-rs
+    /// writes <c>col=</c> for an empty value and <c>col=__HIVE_DEFAULT_PARTITION__</c> for a null, and
+    /// records "" against null in the log, so the two are distinct on disk. The value is lost when the
+    /// column is reconstructed on the READ — by delta-rs and by DuckDB's delta extension alike, which
+    /// is what makes it the format's behaviour rather than one engine's defect. PartitionValueEncodingTests
+    /// pins every step of that.
     ///
     /// So it is checked per batch, before the batch is buffered, rather than at commit: an append
     /// flushes bounded generations, and a generation is a commit that cannot be unwound.
@@ -521,10 +527,10 @@ internal sealed class DeltaWriteSession(
         throw DeltaErrors.Fail(DeltaErrors.UnusablePartitionValue,
             $"output '{output}': partition column(s) " +
             $"{string.Join(", ", offenders.Select(c => $"'{c}'"))} contain an empty value. Delta writes " +
-            "a partition value into a directory name, where an empty value is indistinguishable from a " +
-            "null: a nullable partition column reads those rows back as null, and a NOT NULL one " +
-            "refuses the write outright. A merge keyed on such a column would insert a second copy of " +
-            "them on every run",
+            "a partition value into a directory name, and an empty one does not survive the round " +
+            "trip: a nullable partition column accepts the write and then reads those rows back as " +
+            "null, and a NOT NULL one refuses the write outright. A merge keyed on such a column " +
+            "would insert a second copy of them on every run",
             "filter those rows out in the pipeline SQL, coalesce the column to a non-empty placeholder, " +
             "or partition by a column that is never empty");
     }
