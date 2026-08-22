@@ -284,14 +284,32 @@ internal static class DeltaErrors
     /// DeltaErrorsTests feeds the real AWS body directly.
     ///
     /// The element-name character class is wider than the key=value one — element names carry
-    /// namespace colons, dots and dashes that an env-var-style option key never does. Redaction is by
-    /// backreference, so an opening tag only ever silences its OWN closing tag. Over-redaction is the
-    /// safe direction, as everywhere else in this file: S3's own <c>&lt;Key&gt;</c> element (the
-    /// object path, not a credential) matches the bare <c>key</c> catch-all and is silenced too. That
-    /// costs nothing — every message carrying it also carries the same path inside the request URL,
-    /// which is not an XML element and is left alone.</summary>
+    /// namespace colons, dots and dashes that an env-var-style option key never does. Only the NAME is
+    /// captured; an optional attribute run is matched but left outside the group, so <c>&lt;/\1&gt;</c>
+    /// still closes on the bare name. Redaction is by backreference, so an opening tag only ever
+    /// silences its OWN closing tag. Over-redaction is the safe direction, as everywhere else in this
+    /// file: S3's own <c>&lt;Key&gt;</c> element (the object path, not a credential) matches the bare
+    /// <c>key</c> catch-all and is silenced too. That costs nothing — every message carrying it also
+    /// carries the same path inside the request URL, which is not an XML element and is left alone.
+    ///
+    /// THE PERIMETER, written down so the next author inherits it rather than rediscovering it. This
+    /// pattern covers a well-formed element, with or without attributes, whose name contains a word
+    /// from <see cref="SecretWords"/>. It deliberately does NOT cover:
+    /// <list type="bullet">
+    /// <item><description>a JSON-shaped body (<c>"AccountKey":"…"</c>) — the key=value pattern catches
+    /// the unquoted form, not the quoted one;</description></item>
+    /// <item><description>an unclosed or truncated element, where there is no <c>&lt;/name&gt;</c> for
+    /// the backreference to find;</description></item>
+    /// <item><description>whitespace or a newline between the name and its <c>&gt;</c>.</description></item>
+    /// </list>
+    /// Each is a deliberate limit, not an oversight: no service this connector talks to is known to
+    /// produce any of them, and widening a security-boundary regex against bodies nobody has seen buys
+    /// a speculative gain at the cost of real over-redaction and real backtracking. Measured, this
+    /// pattern's backtracking is quadratic rather than catastrophic (100 KB in 137 ms, 1 MB in 9 s) —
+    /// bounded, but not a budget to spend on shapes that do not exist. Add a shape here when a real
+    /// message is observed carrying it, and bring the message with it.</summary>
     private static readonly Regex SecretShapedXmlElement = new(
-        $@"(?is)<([a-z0-9_:.\-]*(?:{SecretWords})[a-z0-9_:.\-]*)>.*?</\1>",
+        $@"(?is)<([a-z0-9_:.\-]*(?:{SecretWords})[a-z0-9_:.\-]*)(?:\s[^>]*)?>.*?</\1>",
         RegexOptions.Compiled);
 
     /// <summary>Matches userinfo embedded in a URL (<c>scheme://user:pass@host</c>) — the shape a
@@ -412,7 +430,7 @@ internal static class DeltaErrors
         {
             return Fail(UnsafeConcurrentS3,
                 $"the delta {operation} could not commit through a mechanism that is safe against a " +
-                $"second writer, so nothing was written ({raw})",
+                $"second writer, so the table was left unchanged ({raw})",
                 "leave AWS_S3_ALLOW_UNSAFE_RENAME unset — it replaces this failure with commits that " +
                 "are silently overwritten — and remove any AWS_CONDITIONAL_PUT or " +
                 "AWS_S3_LOCKING_PROVIDER value in the environment. This connector commits with a " +

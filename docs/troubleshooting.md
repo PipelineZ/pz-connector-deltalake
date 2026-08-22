@@ -19,15 +19,30 @@ container image at a team that used delta-rs's DynamoDB log store before.
 which are safe against a second writer with no lock table at all. Nothing else has to be configured in
 its place.
 
-**Your table is unchanged.** A refused commit is refused at the log entry, which is the last thing a
-write does — so the table is exactly as it was and no reader sees anything new. It is *not* true that
-nothing was written: measured on a refused append, one orphan `part-*.snappy.parquet` object was left
-in the bucket, because delta-rs writes the data files first and commits the log entry last. No reader
-will ever see it — it is in no commit — but it is storage you are paying for until you remove it.
+**Nothing was written, and there is nothing to clean up.** This failure happens at the table *open* —
+before a single data file is produced — so the run never reaches the point of writing anything.
+Measured on a refused append to a table whose prefix held three objects: three objects afterwards,
+none of them new, and the table still readable with exactly the rows it had.
 
-The same code also covers a commit path with no concurrency guarantee left at all — the message says
-so instead, and names `AWS_S3_ALLOW_UNSAFE_RENAME`. That one is a backstop against a future delta-rs
-whose default moves, and no configuration reaches it today.
+### The other branch of the same code: a commit path with no concurrency guarantee
+
+`PZDL0403` also covers a commit that could not go through a conditional PUT at all. The message says
+so instead, and names `AWS_S3_ALLOW_UNSAFE_RENAME`:
+
+```
+PZDL0403: the delta append of output 'orders' could not commit through a mechanism that is safe
+against a second writer, so the table was left unchanged (...)
+```
+
+No configuration reaches this today — it is a backstop against a future delta-rs whose default moves —
+and the only way to provoke it is to take the conditional PUT away deliberately.
+
+**Your table is unchanged, but one orphan file may be left behind.** Unlike the DynamoDB cause above,
+this one fails at the *log entry*, which is the last thing a write does: delta-rs writes the data
+files first and commits the log entry last. Measured on the same three-object table: **four** objects
+afterwards, the new one a `part-*.snappy.parquet`, and the table still readable with exactly the rows
+it had. No reader will ever see that file — it is in no commit — but it is storage you are paying for
+until you remove it.
 
 ### Two variables that do NOT cause this, and cannot
 

@@ -152,6 +152,31 @@ public class DeltaErrorsTests
         Assert.Contains("18CE059D999CE9DA", ex.Message, StringComparison.Ordinal);
     }
 
+    // An element that carries ATTRIBUTES is the same shape with something between the name and its
+    // '>', and the pattern required them to be adjacent -- so a body spelling the credential
+    // <Credential type="aws4">...</Credential> went through untouched. Attributes are a plausible
+    // variant of the XML bodies this connector demonstrably meets, so this one shape is closed; the
+    // shapes that stay open (JSON, unclosed elements, whitespace before '>') are written down beside
+    // the pattern rather than guessed at.
+    [Theory]
+    [InlineData("<Credential type=\"aws4\">AKIAIOSFODNN7EXAMPLE/20260822/us-east-1</Credential>")]
+    [InlineData("<AccountKey xmlns=\"urn:x\" n=\"1\">c2VjcmV0dmFsdWU=</AccountKey>")]
+    [InlineData("<sig  encoding='base64'>AbCdEf123</sig>")]
+    public void Translate_never_leaks_a_credential_out_of_an_xml_element_with_attributes(string element)
+    {
+        var ex = DeltaErrors.Translate(
+            new DeltaLakeException($"storage rejected the request: <Error>{element}</Error>", 1),
+            DeltaOperationKind.Write, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("AKIAIOSFODNN7EXAMPLE", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("c2VjcmV0dmFsdWU=", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AbCdEf123", ex.Message, StringComparison.Ordinal);
+
+        // The attribute run is matched but never captured, so the closing tag still resolves and the
+        // element name survives to say WHICH field was silenced.
+        Assert.Contains("<redacted>", ex.Message, StringComparison.Ordinal);
+    }
+
     // An Azure XML error body is the same shape with different element names. Nothing in it is a
     // credential today, so this pins that the XML rule does not eat the diagnosis.
     [Fact]
@@ -228,6 +253,14 @@ public class DeltaErrorsTests
         Assert.DoesNotContain(DeltaErrors.CommitConflict, ex.Message, StringComparison.Ordinal);
         Assert.False(ex.IsTransient);
         Assert.Contains("AWS_S3_ALLOW_UNSAFE_RENAME", ex.Message, StringComparison.Ordinal);
+
+        // The message says the TABLE was left unchanged, never that nothing was written. Measured
+        // against a real MinIO: this branch fails at the log entry, which delta-rs commits last, so an
+        // append that reaches it has already put its parquet in the bucket -- three objects before,
+        // four after, the table still holding exactly its old rows. "Nothing was written" would send a
+        // user looking for nothing to clean up.
+        Assert.Contains("left unchanged", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing was written", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
