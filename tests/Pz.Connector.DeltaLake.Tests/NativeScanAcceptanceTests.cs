@@ -84,6 +84,64 @@ public class NativeScanAcceptanceTests
         Assert.Equal(
             new[] { typeof(long), typeof(string), typeof(double) },
             produced.Select(c => c.Type));
+
+        // WHAT THIS DOES NOT COVER, stated because a check that looks complete is worse than one whose
+        // edges are known: the comparison is over CLR types, so a drift WITHIN one CLR type is
+        // invisible. A GetSchemaAsync that started declaring String as LargeString, or Date32 as
+        // Date64, still maps to the same CLR type and stays green here, where the TestKit's own fact —
+        // which compares Arrow DataType.TypeId directly — would have failed.
+        //
+        // That residue is inherent, not an oversight. The two sides speak different vocabularies:
+        // delta-rs declares Arrow types and DuckDB reports .NET ones, and the produced side has no
+        // Arrow type ID to compare against. Comparing declared Arrow IDs to each other would prove
+        // nothing about the scan, and DuckDB legitimately produces an encoding of its own choosing for
+        // a given Delta type, so demanding they match would fail spuriously. The CLR type is the
+        // widest common vocabulary that is honest about both.
+    }
+
+    /// <summary>Pins <see cref="ClrTypeOf"/> against the DuckDB.NET version actually referenced, for
+    /// every Arrow type it claims to know. Needs no delta extension and therefore no network: it asks
+    /// DuckDB to produce each type directly rather than scanning a Delta table.
+    ///
+    /// This exists because the mapping's only job is to be the thing that notices a declared-schema
+    /// drift, and it once claimed DATE arrives as DateTime when DuckDB.NET 1.5.5 reports DateOnly — an
+    /// error that fails loud rather than silently, but that still defeats the fact it serves.</summary>
+    [Fact]
+    public async Task DuckDB_reports_the_CLR_types_this_mapping_claims()
+    {
+        // One column per Arrow type ClrTypeOf knows, in that order. TIMESTAMP appears four times
+        // because DuckDB has four widths and the mapping folds them into one arm.
+        var columns = new (string Sql, IArrowType Arrow)[]
+        {
+            ("CAST(1 AS BIGINT)", Int64Type.Default),
+            ("CAST(1 AS INTEGER)", Int32Type.Default),
+            ("CAST(1 AS DOUBLE)", DoubleType.Default),
+            ("CAST(1 AS FLOAT)", FloatType.Default),
+            ("true", BooleanType.Default),
+            ("'x'", StringType.Default),
+            ("'x'", LargeStringType.Default),
+            ("'x'", StringViewType.Default),
+            ("DATE '2026-01-01'", Date32Type.Default),
+            ("DATE '2026-01-01'", Date64Type.Default),
+            ("TIMESTAMP '2026-01-01'", new TimestampType(TimeUnit.Microsecond, timezone: (string?)null)),
+            ("TIMESTAMP_S '2026-01-01'", new TimestampType(TimeUnit.Second, timezone: (string?)null)),
+            ("TIMESTAMP_MS '2026-01-01'", new TimestampType(TimeUnit.Millisecond, timezone: (string?)null)),
+            ("TIMESTAMP_NS '2026-01-01'", new TimestampType(TimeUnit.Nanosecond, timezone: (string?)null)),
+            ("CAST(1 AS DECIMAL(18,2))", new Decimal128Type(18, 2)),
+            ("CAST(1 AS DECIMAL(38,0))", new Decimal128Type(38, 0)),
+        };
+
+        using var conn = new DuckDBConnection("DataSource=:memory:");
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "select " + string.Join(", ",
+            columns.Select((c, i) => $"{c.Sql} as c{i.ToString(CultureInfo.InvariantCulture)}"));
+        using var reader = await cmd.ExecuteReaderAsync();
+
+        for (var i = 0; i < columns.Length; i++)
+        {
+            Assert.Equal(ClrTypeOf(columns[i].Arrow), reader.GetFieldType(i));
+        }
     }
 
     /// <summary>The CLR type DuckDB's reader hands back for a given Arrow type — the only vocabulary
@@ -99,7 +157,13 @@ public class NativeScanAcceptanceTests
         ArrowTypeId.Float => typeof(float),
         ArrowTypeId.Boolean => typeof(bool),
         ArrowTypeId.String or ArrowTypeId.LargeString or ArrowTypeId.StringView => typeof(string),
-        ArrowTypeId.Date32 or ArrowTypeId.Date64 or ArrowTypeId.Timestamp => typeof(DateTime),
+        // DATE and TIMESTAMP differ, and the difference is measured rather than assumed: DuckDB.NET
+        // 1.5.5's reader reports DateOnly for DATE and DateTime for every TIMESTAMP width
+        // (TIMESTAMP_S/_MS/_NS included). Pinned by
+        // DuckDB_reports_the_CLR_types_this_mapping_claims below, because a mapping whose whole job is
+        // to notice drift is worthless if it is itself wrong.
+        ArrowTypeId.Date32 or ArrowTypeId.Date64 => typeof(DateOnly),
+        ArrowTypeId.Timestamp => typeof(DateTime),
         ArrowTypeId.Decimal128 => typeof(decimal),
         _ => throw new NotSupportedException(
             $"no DuckDB CLR type known for Arrow {type.Name}; add it rather than letting the " +

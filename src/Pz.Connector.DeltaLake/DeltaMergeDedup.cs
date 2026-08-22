@@ -210,7 +210,19 @@ internal static class DeltaMergeDedup
             // what Double.Equals/Single.Equals say too.
             DoubleArray a => a.GetValue(row)!.Value,
             FloatArray a => a.GetValue(row)!.Value,
-            Decimal128Array a => a.GetValue(row)!.Value,
+            // Compared as its raw 16-byte payload, NOT as a System.Decimal, and that is a correctness
+            // fix rather than a micro-optimisation. Delta and DataFusion allow decimal(38, s), whose
+            // range exceeds System.Decimal's: measured against Apache.Arrow 23.0.0, GetValue() on a
+            // decimal(38, 0) holding 10^30 throws OverflowException — uncoded, and raised from outside
+            // MergeAsync's try, so it would escape CommitAsync carrying no PZDL#### at all. GetBytes()
+            // cannot overflow, and the payload is exact: within one column precision and scale are
+            // fixed, so two values are equal exactly when their two's-complement payloads are, which
+            // is the same equality DataFusion's ON clause applies.
+            //
+            // Decimal128Array derives from FixedSizeBinaryArray, so this arm MUST precede that one.
+            // Reordering is not a silent hazard: the compiler answers a subsumed arm with CS8510
+            // (unreachable pattern), which TreatWarningsAsErrors turns into a build failure.
+            Decimal128Array a => Convert.ToHexString(a.GetBytes(row)),
             BooleanArray a => a.GetValue(row)!.Value,
             Date32Array a => a.GetDateTime(row)!.Value,
             Date64Array a => a.GetDateTime(row)!.Value,
@@ -221,11 +233,14 @@ internal static class DeltaMergeDedup
             // Four UNRELATED classes, not one hierarchy: BinaryArray, LargeBinaryArray,
             // BinaryViewArray and FixedSizeBinaryArray each derive straight from Array, so one arm
             // does not cover the others and every binary encoding IsComparable admits needs its own
-            // here or it falls to the throw below. They sit after the string arms deliberately, and
-            // that ordering is load-bearing the other way round: StringArray derives from
-            // BinaryArray, StringViewArray from BinaryViewArray and LargeStringArray from
-            // LargeBinaryArray, so a string column reaching a binary arm would be compared as hex
-            // rather than as text.
+            // here or it falls to the throw below.
+            //
+            // Where derivation DOES exist it dictates arm order, in both directions. StringArray
+            // derives from BinaryArray, StringViewArray from BinaryViewArray and LargeStringArray
+            // from LargeBinaryArray, so the string arms must precede these or a string column would
+            // be compared as hex rather than as text; Decimal128Array derives from
+            // FixedSizeBinaryArray, so its arm must precede that one. None of it can regress
+            // silently — a subsumed arm is CS8510, which TreatWarningsAsErrors makes a build error.
             BinaryArray a => Convert.ToHexString(a.GetBytes(row)),
             LargeBinaryArray a => Convert.ToHexString(a.GetBytes(row)),
             BinaryViewArray a => Convert.ToHexString(a.GetBytes(row)),

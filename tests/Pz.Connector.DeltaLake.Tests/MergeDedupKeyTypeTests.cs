@@ -1,3 +1,4 @@
+using System.Numerics;
 using Apache.Arrow;
 using Apache.Arrow.Arrays;
 using Apache.Arrow.Types;
@@ -65,6 +66,50 @@ public class MergeDedupKeyTypeTests
         // Rebuilt, not the buffer handed straight back: reaching the right count while returning the
         // input unchanged would mean the repeat was never recognised at all.
         Assert.DoesNotContain(batch, resolved);
+    }
+
+    /// <summary>A decimal key too large for <see cref="decimal"/> resolves instead of throwing.
+    ///
+    /// Delta and DataFusion allow decimal(38, s), whose range exceeds System.Decimal's, and
+    /// DeltaTypeSupport accepts the type for writes — so this is a live shape, not an exotic one.
+    /// Reading it through <c>Decimal128Array.GetValue</c> raises an OverflowException from outside
+    /// MergeAsync's try block, which would escape CommitAsync as an uncoded exception: no PZDL####, no
+    /// named cause, no next step. Comparing the raw 16-byte payload removes the failure rather than
+    /// reporting it, and is exact — precision and scale are fixed within a column, so equal payloads
+    /// are equal values.</summary>
+    [Fact]
+    public void A_decimal_key_too_large_for_System_Decimal_resolves_instead_of_overflowing()
+    {
+        var type = new Decimal128Type(38, 0);
+        var schema = new Schema([new Field("k", type, nullable: false)], null);
+        DeltaMergeDedup.AssertResolvableKeys(schema, ["k"], "out");
+
+        // 10^30 -- outside System.Decimal's range, comfortably inside decimal(38, 0)'s. Rows 0 and 2
+        // repeat it; row 1 carries a different over-range value, so the resolver must also tell two
+        // unrepresentable values APART rather than collapsing both to one unreadable key.
+        var batch = new RecordBatch(
+            schema, [Decimals(type, BigInteger.Pow(10, 30), BigInteger.Pow(10, 31), BigInteger.Pow(10, 30))], 3);
+
+        var resolved = DeltaMergeDedup.LastWriterWins([batch], ["k"]);
+
+        Assert.Equal(2, resolved.Sum(b => b.Length));
+        Assert.DoesNotContain(batch, resolved);
+    }
+
+    private static IArrowArray Decimals(Decimal128Type type, params BigInteger[] values)
+    {
+        var buffer = new ArrowBuffer.Builder<byte>();
+        foreach (var value in values)
+        {
+            // Two's-complement little-endian, zero-padded to the type's width -- the layout Arrow
+            // stores a decimal in, so the bytes below are the same ones a real column would carry.
+            var payload = new byte[type.ByteWidth];
+            value.ToByteArray(isUnsigned: true, isBigEndian: false).CopyTo(payload, 0);
+            buffer.Append(payload.AsSpan());
+        }
+
+        return new Decimal128Array(new ArrayData(
+            type, values.Length, nullCount: 0, offset: 0, buffers: [ArrowBuffer.Empty, buffer.Build()]));
     }
 
     /// <summary>The guard's own refusal, on the family it does NOT admit — the other half of the
