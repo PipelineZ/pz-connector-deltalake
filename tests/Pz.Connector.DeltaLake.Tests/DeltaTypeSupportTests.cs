@@ -244,7 +244,7 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
     // file's own single candidate of each kind (int32-indexed dictionary of strings; int32 run-ends
     // over int64 values; a two-field int64/string sparse union) -- they are not general-purpose
     // builders for arbitrary Dictionary/RunEndEncoded/Union shapes.
-    private static IArrowArray SingleValueArrayFor(IArrowType type) => type switch
+    internal static IArrowArray SingleValueArrayFor(IArrowType type) => type switch
     {
         NullType => new NullArray(1),
         BooleanType => new BooleanArray.Builder().AppendNull().Build(),

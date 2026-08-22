@@ -13,10 +13,13 @@ namespace Pz.Connector.DeltaLake;
 /// spelling. <see cref="Stored"/> is what a reconcile compares against, because a Delta table does not
 /// necessarily come back shaped like the Arrow schema that created it.
 ///
-/// Nested types are recursed into for LIST, STRUCT and MAP only, mirroring
-/// <see cref="DeltaTypeSupport.IsWritable"/>'s own recursion set exactly — see the gap it documents for
-/// LargeList/ListView/LargeListView, which applies here for the same reason and must be closed in both
-/// places at once or not at all.</summary>
+/// Both recurse into EVERY container Arrow has, which is wider than
+/// <see cref="DeltaTypeSupport.IsWritable"/>'s recursion set and deliberately so: refusing on an
+/// unobserved inner type is a claim about what delta-rs rejects, which is why that predicate is
+/// cautious, whereas rewriting a spelling or naming a stored shape inside a container is the same
+/// answer at every depth. An extension type is left alone by <see cref="Canonical"/> — its storage type
+/// is its own business — and reported as its storage type by <see cref="Stored"/>, which is what
+/// delta-rs puts in the table.</summary>
 internal static class DeltaArrowTypes
 {
     /// <summary>Rewrites a schema into the spelling delta-rs accepts, changing no value and no buffer.
@@ -63,7 +66,12 @@ internal static class DeltaArrowTypes
     {
         TimestampType t when t.Timezone is { Length: > 0 } tz && DenotesUtc(tz) && tz != "UTC" =>
             new TimestampType(t.Unit, "UTC"),
+        ExtensionType e => e,
         ListType l => Rewrap(l, Canonical),
+        LargeListType l => Rewrap(l, Canonical),
+        ListViewType l => Rewrap(l, Canonical),
+        LargeListViewType l => Rewrap(l, Canonical),
+        FixedSizeListType f => Rewrap(f, Canonical),
         StructType s => Rewrap(s, Canonical),
         MapType m => Rewrap(m, Canonical),
         _ => type,
@@ -91,6 +99,12 @@ internal static class DeltaArrowTypes
         UInt64Type => Int64Type.Default,
         // Delta has one date type: a day count.
         Date64Type => Date32Type.Default,
+        // An extension type is stored as the type it is built on; the extension name does not survive.
+        ExtensionType e => Stored(e.StorageType),
+        // A dictionary-encoded column is stored as its VALUE type; the encoding does not survive. As a
+        // PARTITION column it cannot be stored at all — see DeltaTypeSupport.AssertPartitionable, which
+        // is the refusal this mapping makes necessary.
+        DictionaryType d => Stored(d.ValueType),
         // Delta has one string type and one binary type; every Arrow encoding of either collapses onto
         // it. Every Decimal*Type derives from FixedSizeBinaryType, so the decimal arm must precede the
         // binary one or a decimal column would be described as binary — a subsumed arm is CS8510,
@@ -98,15 +112,22 @@ internal static class DeltaArrowTypes
         StringViewType or LargeStringType => StringType.Default,
         Decimal128Type or Decimal256Type or Decimal32Type or Decimal64Type => type,
         BinaryViewType or LargeBinaryType or FixedSizeBinaryType => BinaryType.Default,
-        // Delta stores a dictionary-encoded column as its VALUE type; the encoding does not survive.
-        DictionaryType d => Stored(d.ValueType),
         // Delta stores one timestamp precision, microseconds, whatever unit was offered. An empty
         // timezone comes back as no timezone at all.
         TimestampType t => new TimestampType(
             TimeUnit.Microsecond, t.Timezone is { Length: > 0 } tz ? tz : null),
-        ListType l => Rewrap(l, Stored),
+        // Delta has one list type, and all four Arrow list encodings collapse onto it.
+        ListType l => AsList(l.ValueField, Stored),
+        LargeListType l => AsList(l.ValueField, Stored),
+        ListViewType l => AsList(l.ValueField, Stored),
+        LargeListViewType l => AsList(l.ValueField, Stored),
         StructType s => Rewrap(s, Stored),
         MapType m => Rewrap(m, Stored),
+        // NOT observed, and unreachable through this sink: DeltaTypeSupport refuses FixedSizeList at
+        // BeginWriteAsync, so no create is ever made from one and there is no stored shape to have
+        // measured. Recursing keeps the inner type honest if that refusal is ever lifted; it does not
+        // claim to know what Delta does with the container.
+        FixedSizeListType f => Rewrap(f, Stored),
         _ => type,
     };
 
@@ -145,12 +166,48 @@ internal static class DeltaArrowTypes
             && (timezone[0] == '+' || timezone[0] == '-')
             && timezone[1..] is "00:00" or "0000" or "00");
 
+    /// <summary>The one list shape Delta has, carrying the mapped element type.</summary>
+    private static IArrowType AsList(Field valueField, Func<IArrowType, IArrowType> map) =>
+        new ListType(Rewrap(valueField, map(valueField.DataType)));
+
     private static IArrowType Rewrap(ListType type, Func<IArrowType, IArrowType> map)
     {
         var inner = map(type.ValueDataType);
         return ReferenceEquals(inner, type.ValueDataType)
             ? type
             : new ListType(Rewrap(type.ValueField, inner));
+    }
+
+    private static IArrowType Rewrap(LargeListType type, Func<IArrowType, IArrowType> map)
+    {
+        var inner = map(type.ValueDataType);
+        return ReferenceEquals(inner, type.ValueDataType)
+            ? type
+            : new LargeListType(Rewrap(type.ValueField, inner));
+    }
+
+    private static IArrowType Rewrap(ListViewType type, Func<IArrowType, IArrowType> map)
+    {
+        var inner = map(type.ValueDataType);
+        return ReferenceEquals(inner, type.ValueDataType)
+            ? type
+            : new ListViewType(Rewrap(type.ValueField, inner));
+    }
+
+    private static IArrowType Rewrap(LargeListViewType type, Func<IArrowType, IArrowType> map)
+    {
+        var inner = map(type.ValueDataType);
+        return ReferenceEquals(inner, type.ValueDataType)
+            ? type
+            : new LargeListViewType(Rewrap(type.ValueField, inner));
+    }
+
+    private static IArrowType Rewrap(FixedSizeListType type, Func<IArrowType, IArrowType> map)
+    {
+        var inner = map(type.ValueDataType);
+        return ReferenceEquals(inner, type.ValueDataType)
+            ? type
+            : new FixedSizeListType(Rewrap(type.ValueField, inner), type.ListSize);
     }
 
     private static IArrowType Rewrap(StructType type, Func<IArrowType, IArrowType> map)

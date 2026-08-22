@@ -15,9 +15,14 @@ namespace Pz.Connector.DeltaLake.Tests;
 /// The variable-width binary family is why this file exists. BinaryArray, LargeBinaryArray,
 /// BinaryViewArray and FixedSizeBinaryArray each derive straight from Apache.Arrow's Array — four
 /// unrelated classes, not one hierarchy — so an arm written for one covers none of the others, and the
-/// compiler cannot say so. The mismatch was invisible for a second reason: delta-rs maps every binary
-/// width to Delta 'binary', so a write declaring one is refused at reconcile with PZDL0301 before a
-/// merge can run. Latent rather than absent is exactly the kind that becomes live later.</summary>
+/// compiler cannot say so.
+///
+/// All four reach a real merge. delta-rs maps every binary width to Delta 'binary', and Reconcile
+/// compares the write against what Delta STORES rather than against the type offered, so a write
+/// declaring any of them is accepted and its key column arrives here in exactly the encoding it was
+/// written in. While Reconcile compared the offered type instead, none of them could get past
+/// BeginWriteAsync at all and this file was the only thing standing between the resolver and an
+/// uncoded NotSupportedException in the middle of a merge.</summary>
 public class MergeDedupKeyTypeTests
 {
     private static readonly byte[] First = [0x01, 0x02];

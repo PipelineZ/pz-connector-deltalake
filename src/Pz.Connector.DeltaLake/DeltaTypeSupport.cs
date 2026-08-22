@@ -29,16 +29,12 @@ namespace Pz.Connector.DeltaLake;
 /// — is a spelling delta-rs refuses and this predicate refuses too; the rewrite happens upstream so
 /// that a difference the user can act on is the only thing that reaches an error message.
 ///
-/// A DICTIONARY-encoded column returns TRUE here, and that is correct rather than an oversight, but the
-/// reason is worth writing down because it is not obvious. Called against raw delta-rs, a dictionary
-/// column writes fine as an ordinary column and fails the INSERT when delta-rs has to partition by it
-/// ("Error partitioning record batch: Missing partition column") — an uncoded failure that would seem
-/// to need a guard here. It does not: no write reaches it. Delta stores the column's value type, so the
-/// table's schema comes back utf8 where the batch said dictionary, and DeltaLakeSink's Reconcile refuses
-/// the write with PZDL0301 before a row is sent — measured through the sink, partitioned and not.
-/// Adding a partition-specific refusal on top would be dead code. The cost of Reconcile getting there
-/// first is that an ordinary dictionary column delta-rs WOULD accept is refused too; the remedy it
-/// names (cast the column in the pipeline SQL) is the right one either way.</summary>
+/// A DICTIONARY-encoded column returns TRUE here, and as an ORDINARY column that is the whole story —
+/// measured, a dictionary column creates and inserts fine, and Delta stores it as its value type. As a
+/// PARTITION column it is not: delta-rs fails the insert with "Error partitioning record batch: Missing
+/// partition column", which is why <see cref="AssertPartitionable"/> exists beside this predicate
+/// rather than inside it. The distinction cannot be made here, because this predicate sees a type and
+/// not which columns the table partitions by.</summary>
 internal static class DeltaTypeSupport
 {
     public static bool IsWritable(IArrowType type) => type.TypeId switch
@@ -77,6 +73,51 @@ internal static class DeltaTypeSupport
                            IsWritable(((MapType)type).ValueField.DataType),
         _ => true,
     };
+
+    /// <summary>Refuses a dictionary-encoded PARTITION column, which is the one shape
+    /// <see cref="IsWritable"/> cannot answer for on its own.
+    ///
+    /// Measured against DeltaLake.Net 0.33.0: a dictionary-encoded column partitions nothing. The
+    /// create succeeds, and the insert fails with "Error partitioning record batch: Missing partition
+    /// column" — a message that names neither the column nor the output, and lands as PZDL0404's
+    /// catch-all whose next step talks about protocol versions. As an ordinary column the same
+    /// encoding writes perfectly well, so this cannot be a refusal of the type.
+    ///
+    /// Called TWICE by DeltaLakeSink, and both are needed. Once pre-flight against the declared
+    /// partition_by, so the create never happens — a configuration error must not leave a table
+    /// behind. Once after the table is open against the table's OWN partition columns, which a run
+    /// that declares no partition_by inherits: an earlier run can have partitioned by a column this
+    /// run sends dictionary-encoded, and nothing before this point would notice.</summary>
+    public static void AssertPartitionable(
+        Schema schema, IReadOnlyList<string> partitionColumns, string output)
+    {
+        if (partitionColumns.Count == 0)
+        {
+            return;
+        }
+
+        // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive. A partition
+        // column the write does not carry is Reconcile's problem, not this one.
+        var names = partitionColumns.ToHashSet(StringComparer.Ordinal);
+        var bad = schema.FieldsList
+            .Where(f => names.Contains(f.Name) && f.DataType is DictionaryType)
+            .Select(f => $"'{f.Name}'")
+            .ToList();
+
+        if (bad.Count == 0)
+        {
+            return;
+        }
+
+        // Every offending column at once: a user fixing one column per run is a user running the
+        // pipeline once per column.
+        throw DeltaErrors.Fail(DeltaErrors.UnwritableArrowType,
+            $"output '{output}': partition column(s) {string.Join(", ", bad)} arrive dictionary-encoded, " +
+            "and Delta cannot build a partition directory from a dictionary-encoded column — the same " +
+            "column writes correctly when it is not a partition column",
+            "cast those columns in the pipeline SQL so they arrive as plain values, or partition by a " +
+            "column that does");
+    }
 
     public static void Assert(Schema schema)
     {

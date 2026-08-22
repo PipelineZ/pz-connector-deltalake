@@ -279,6 +279,10 @@ internal sealed class DeltaLakeSink : ISink
         // types, or the create writes one shape and the reconcile compares another.
         schema = DeltaArrowTypes.Canonical(schema);
         DeltaTypeSupport.Assert(schema);
+        // Pre-flight, against the DECLARED partition columns: a column Delta cannot partition by is a
+        // configuration error, and a configuration error must not open, create or touch a table. The
+        // table's own partition columns are checked again below, once they are known.
+        DeltaTypeSupport.AssertPartitionable(schema, options.PartitionBy, spec.Output);
 
         var names = schema.FieldsList.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
         var missing = options.Keys.Where(k => !names.Contains(k)).ToList();
@@ -311,6 +315,12 @@ internal sealed class DeltaLakeSink : ISink
             var existing = await DeltaBigStack.RunAsync(
                 () => Task.FromResult((table.Schema(), table.Metadata().PartitionColumns))).ConfigureAwait(false);
             Reconcile(schema, existing.Item1, existing.Item2, options, spec);
+
+            // Again, now against the TABLE's own partition columns. A run that declares no
+            // partition_by inherits whatever an earlier run chose, and Reconcile compares a
+            // dictionary-encoded column against the value type Delta stored it as — so the encoding
+            // reaches here unremarked and would fail inside delta-rs's own partitioning instead.
+            DeltaTypeSupport.AssertPartitionable(schema, existing.Item2 ?? [], spec.Output);
             // The TABLE's column names, not the write's: they are what a target.-qualified name in a
             // merge_predicate has to resolve against, and under schema_policy: evolve the table
             // legitimately carries nullable columns this write does not produce.

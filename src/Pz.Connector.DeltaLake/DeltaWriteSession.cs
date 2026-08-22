@@ -548,6 +548,12 @@ internal sealed class DeltaWriteSession(
         // StringArray/LargeStringArray/StringViewArray derive from these three, so the three cases
         // cover all six encodings a batch may arrive in — which one it is depends on the plan that
         // produced the batch, not on the column's Delta type.
+        //
+        // That all six really do arrive rests on a decision made elsewhere: Delta stores one string
+        // type and one binary type, and Reconcile compares a write against what Delta STORES rather
+        // than against the type offered. A reconcile comparing the offered type would refuse four of
+        // these six at BeginWriteAsync, and four of the arms below would be answering for encodings no
+        // batch could carry.
         Func<int, int>? length = array switch
         {
             BinaryArray a => a.GetValueLength,
