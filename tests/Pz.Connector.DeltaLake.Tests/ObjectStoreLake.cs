@@ -77,6 +77,11 @@ internal static class ObjectStoreLake
         }
     }
 
+    /// <summary>The head of an exception message, for a skip reason. A Testcontainers start failure
+    /// carries a multi-line docker diagnostic; the first line says which resource was unreachable,
+    /// which is the whole point of putting it in the skip.</summary>
+    public static string FirstLine(Exception ex) => ex.Message.Split('\n', 2)[0].Trim();
+
     /// <summary>The table read back through delta-rs, using the same storage options the write used.
     /// Needs nothing off the network, so the facts that assert what a write actually committed do not
     /// depend on a DuckDB extension download.</summary>
@@ -109,6 +114,16 @@ public sealed class MinioLake : IAsyncLifetime
     /// both, which is exactly the agreement the round-trip fact exists to prove.</summary>
     public string Endpoint { get; private set; } = string.Empty;
 
+    /// <summary>Why the container is not there, when docker itself was available. Docker being up says
+    /// nothing about the registry being reachable: an uncached image on a machine with no route to
+    /// Docker Hub throws inside collection-fixture construction, which xunit reports as a collection
+    /// ERROR — ten facts FAILING rather than skipping, against the standing rule that infrastructure
+    /// suites skip. The reason travels into the skip message so an unavailable registry is still
+    /// visible in the log rather than silently swallowed.</summary>
+    public string? Unavailable { get; private set; }
+
+    public void SkipIfUnavailable() => Skip.If(this.Unavailable is not null, this.Unavailable ?? string.Empty);
+
     public async Task InitializeAsync()
     {
         if (!DockerFacts.CanStartContainers)
@@ -116,8 +131,16 @@ public sealed class MinioLake : IAsyncLifetime
             return;
         }
 
-        this.container = new MinioBuilder(Image).Build();
-        await this.container.StartAsync();
+        try
+        {
+            this.container = new MinioBuilder(Image).Build();
+            await this.container.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            this.Unavailable = $"minio could not be started: {ObjectStoreLake.FirstLine(ex)}";
+            return;
+        }
 
         var connectionString = this.container.GetConnectionString();
         var uri = new Uri(connectionString);
@@ -200,17 +223,30 @@ public sealed class AzuriteLake : IAsyncLifetime
         catch (Exception)
         {
             // Something already holds 10000. Every fact that does not need the well-known port still
-            // has to run, so start again on a mapped one; a start that fails for any OTHER reason
-            // fails again here and propagates, rather than being turned into a skip.
+            // has to run, so start again on a mapped one.
             await DisposeContainerAsync(this.container);
-            this.container = new AzuriteBuilder(Image).Build();
-            await this.container.StartAsync();
-            this.WellKnownBlobPort = false;
+            try
+            {
+                this.container = new AzuriteBuilder(Image).Build();
+                await this.container.StartAsync();
+                this.WellKnownBlobPort = false;
+            }
+            catch (Exception ex)
+            {
+                // The port was not the problem: an unreachable registry, most likely. See MinioLake's
+                // Unavailable for why that has to skip rather than error the collection.
+                this.Unavailable = $"azurite could not be started: {ObjectStoreLake.FirstLine(ex)}";
+                return;
+            }
         }
 
         this.ConnectionString = this.container.GetConnectionString();
         await new BlobServiceClient(this.ConnectionString).CreateBlobContainerAsync(BlobContainer);
     }
+
+    public string? Unavailable { get; private set; }
+
+    public void SkipIfUnavailable() => Skip.If(this.Unavailable is not null, this.Unavailable ?? string.Empty);
 
     public Task DisposeAsync() => DisposeContainerAsync(this.container);
 

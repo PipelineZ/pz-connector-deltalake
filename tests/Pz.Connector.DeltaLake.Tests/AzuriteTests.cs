@@ -40,6 +40,7 @@ public class AzuriteTests(AzuriteLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
         Skip.IfNot(await TestNetwork.CanInstallDuckDbExtensionsAsync(),
             "the duckdb delta extension could not be installed");
         Skip.IfNot(lake.WellKnownBlobPort,
@@ -63,6 +64,7 @@ public class AzuriteTests(AzuriteLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         const string Entity = "az_commit";
         var config = lake.Config();
@@ -82,6 +84,7 @@ public class AzuriteTests(AzuriteLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         const string Entity = "az_second";
         var config = lake.Config();
@@ -130,11 +133,18 @@ public class AzuriteTests(AzuriteLake lake)
         Assert.False(plain.ContainsKey("AZURE_ALLOW_HTTP"));
     }
 
+    /// <summary>The azure half of the secret-hygiene tripwire, with teeth of its own rather than
+    /// borrowed from a sibling fact. Asserting only "some PZDL error without the key in it" is not
+    /// enough: that also holds when the write never leaves the process — measured, the
+    /// AZURE_ALLOW_HTTP mutation makes every azure write fail at the transport builder, and this fact
+    /// passed under it. So it additionally asserts the failure is a 403 from the SERVICE, which is
+    /// what proves the wrong key was actually presented and rejected rather than never sent.</summary>
     [SkippableFact]
     public async Task A_rejected_credential_is_reported_without_the_account_key_in_the_message()
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         const string WrongKey = "cHpkbC1ub3QtdGhlLXJlYWwtYWNjb3VudC1rZXk=";
         var wrong = System.Text.RegularExpressions.Regex.Replace(
@@ -149,6 +159,12 @@ public class AzuriteTests(AzuriteLake lake)
         }
 
         Assert.StartsWith("PZDL", ex.Message, StringComparison.Ordinal);
+
+        // Reached Azurite and was refused there. "builder error" is what a request that never left the
+        // process reports, and it is the outcome this assertion exists to tell apart from a genuine
+        // authentication rejection.
+        Assert.Contains("403", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("builder error", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private static OutputSpec Spec(string entity, string mode) =>

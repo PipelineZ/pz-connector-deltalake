@@ -3,35 +3,55 @@
 Symptoms this connector's object-store backends produce, and what each one means. Every message below
 was reproduced against a real server; none of them is a guess at what a library might say.
 
-## `PZDL0403`: the commit path is not safe against a second writer
+## `PZDL0403`: the S3 commit did not go through this connector's commit path
 
 ```
-PZDL0403: the delta append of output 'orders' could not commit through a mechanism that is safe
-against a second writer, so nothing was written (...)
+PZDL0403: the delta append of output 'orders' was routed through delta-rs's DynamoDB locking log
+store, which this connector never configures and cannot supply a lock table for (...)
 ```
 
-A commit to `s3://` is a conditional PUT. This code says delta-rs could not use one — so the only
-paths left would overwrite another writer's commit, and it refused instead of taking one.
+**Cause: `AWS_S3_LOCKING_PROVIDER=dynamodb` in the environment the run inherits.** It is the one
+variable measured to break this connector, and it breaks it completely — every S3 write and every S3
+*read*, because the table cannot even be opened. It commonly survives in a shell profile or a
+container image at a team that used delta-rs's DynamoDB log store before.
 
-The connector never configures a path like that, so the cause is in the environment delta-rs also
-reads:
+**Fix: remove it.** This connector does not need a locking provider. Its commits are conditional PUTs,
+which are safe against a second writer with no lock table at all. Nothing else has to be configured in
+its place.
 
-- **`AWS_S3_ALLOW_UNSAFE_RENAME=true`** — remove it. It does not fix this error; it replaces it with
-  commits that disappear silently. There is no configuration in which this connector needs it.
-- **`AWS_CONDITIONAL_PUT`** set to anything — remove it. The connector sets `etag` itself.
-- **`AWS_S3_LOCKING_PROVIDER=dynamodb`** — remove it. No locking provider is required.
+**Your table is unchanged.** A refused commit is refused at the log entry, which is the last thing a
+write does — so the table is exactly as it was and no reader sees anything new. It is *not* true that
+nothing was written: measured on a refused append, one orphan `part-*.snappy.parquet` object was left
+in the bucket, because delta-rs writes the data files first and commits the log entry last. No reader
+will ever see it — it is in no commit — but it is storage you are paying for until you remove it.
 
-Nothing was written when you see this: the refusal happens before the commit.
+The same code also covers a commit path with no concurrency guarantee left at all — the message says
+so instead, and names `AWS_S3_ALLOW_UNSAFE_RENAME`. That one is a backstop against a future delta-rs
+whose default moves, and no configuration reaches it today.
+
+### Two variables that do NOT cause this, and cannot
+
+Measured against delta-rs 0.33.0 on 2026-08-22, exported into the process environment:
+
+| exported | effect |
+|---|---|
+| `AWS_S3_ALLOW_UNSAFE_RENAME=true` | **none.** The write still commits through the conditional PUT. |
+| `AWS_CONDITIONAL_PUT=disabled` | **none.** The write still succeeds. |
+
+The connector sets `AWS_CONDITIONAL_PUT` explicitly as a storage option, and a storage option beats the
+environment — so a shell cannot force this connector onto an unsafe commit path. Removing either
+variable will not fix a failing run, because neither can have caused one.
 
 ## Rows are missing after two runs wrote the same S3 table at once
 
 Both runs reported success and the table holds one run's rows. The endpoint accepted the conditional
 PUT's precondition and ignored it, so both writers wrote the same commit file and the later one won.
 
-Check the server, not the pipeline. Amazon S3 enforces `If-None-Match` (since August 2024) and so do
-current MinIO builds; older MinIO and some S3-compatible gateways do not. `docs/limitations.md` has
-the measurement and the table of what was observed on which build. A single-writer table is
-unaffected.
+Check the server, not the pipeline. `docs/limitations.md` has a two-command probe that answers it
+outright — two conditional PUTs of the same key, where a second success means your endpoint will lose
+commits — plus the measured table of what was observed on which MinIO build. Current MinIO builds
+enforce the precondition and older ones do not; AWS documents enforcement since August 2024, which
+this repository has not verified. A single-writer table is unaffected.
 
 ## `az://`: `Generic MicrosoftAzure error: ... HTTP error: builder error`
 

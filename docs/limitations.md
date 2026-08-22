@@ -38,12 +38,39 @@ there afterwards. The table above comes from a ten-round measurement run against
 that keeps it true — three rounds of the same four writers — and pointing its fixture at the 2023
 image fails it, on the row count, in the first round.
 
-**What to do about it.** Amazon S3 has enforced `If-None-Match` since August 2024, so a real AWS
-endpoint is safe. If you write concurrently to an S3-compatible store — MinIO, Ceph, a vendor gateway
-— check that it implements conditional writes, and upgrade it if it does not. There is no way for this
-connector to detect a store that ignores the precondition: the header is accepted either way, and the
-difference is only visible after a race has already lost a commit. **A single-writer table is
-unaffected**, whatever the endpoint.
+**Amazon S3 itself.** AWS documents conditional writes on `PutObject` via `If-None-Match`, available
+since August 2024. **This repository has never talked to Amazon S3** — every measurement above is
+against MinIO — so that is AWS's claim, attributed, not a result established here. Verify it the same
+way you would verify any other endpoint:
+
+### How to check whether your endpoint enforces `If-None-Match`
+
+Two conditional PUTs of the same key. The first must succeed and the second must be refused. If the
+second succeeds, concurrent Delta commits to that endpoint will be lost silently.
+
+```bash
+# aws-cli (works against any S3-compatible endpoint; drop --endpoint-url for Amazon S3)
+aws s3api put-object --bucket YOUR_BUCKET --key pz-condput-probe \
+    --if-none-match '*' --endpoint-url https://YOUR_ENDPOINT
+aws s3api put-object --bucket YOUR_BUCKET --key pz-condput-probe \
+    --if-none-match '*' --endpoint-url https://YOUR_ENDPOINT
+```
+
+- **Second call fails** with `PreconditionFailed` / HTTP 412 (`At least one of the pre-conditions you
+  specified did not hold`) — the endpoint enforces the precondition. Concurrent writers are safe.
+- **Second call succeeds** — the endpoint accepts the header and ignores it. **Do not run two writers
+  against one Delta table on this endpoint.** Upgrade the store, or serialize your writes.
+
+Delete `pz-condput-probe` afterwards. That is exactly the probe used to confirm MinIO
+`RELEASE.2025-09-07T16-13-09Z`: first PUT accepted, second refused with *"At least one of the
+pre-conditions you specified did not hold"*.
+
+There is no way for this connector to run that check for you. The header is accepted either way, the
+difference is only visible after a race has already lost a commit, and a probe would have to sign its
+own request — impossible under the ambient-credential configurations this connector supports, where it
+holds no keys at all.
+
+**A single-writer table is unaffected**, whatever the endpoint.
 
 ## `replace` does not remove rows another writer committed while it was running
 
@@ -64,3 +91,15 @@ The replace commits three rows, ids 100–102:
 
 The window is the whole write session, which for a large output is the whole run. If `replace` must
 mean "the table holds exactly these rows", do not run two writers against that output at once.
+
+## Run artifacts name the storage locations a failure touched
+
+A write failure's message is written verbatim into `run_results.json` and onto the NDJSON event
+stream, and it carries what the storage layer said — which includes the **bucket or container, the
+object path, and the endpoint host and port**. A retry's `reason` carries the same text.
+
+That is deliberate: a storage failure naming neither bucket nor path is undiagnosable. Credentials are
+stripped before the message is built (`DeltaErrors.Redact`, covering both the `name=value` and the XML
+shapes an S3 or Azure error arrives in), so what remains is operational identifiers rather than
+secrets. But if you ship run artifacts or events off the machine — to a ticket, a log aggregator, a
+support thread — **they name where your data lives**. Treat them accordingly.

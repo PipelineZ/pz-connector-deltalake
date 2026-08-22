@@ -29,9 +29,18 @@ endpoint only. Those schemes are accepted by the connector's root classification
 — nothing has ever written a table through one.
 
 **No test in this repository has ever talked to Amazon S3 or to Azure Storage.** Both are emulators.
-Where an emulator and the real service differ, this repository measures the emulator; the two places
-that difference is known to matter — conditional-PUT enforcement on S3, and endpoint addressing on
-Azure — are written up in `docs/limitations.md` and `docs/troubleshooting.md`.
+Where an emulator and the real service differ, this repository measures the emulator; the three places
+that difference is known to matter are written up in `docs/limitations.md` and
+`docs/troubleshooting.md`:
+
+- **conditional-PUT enforcement on S3** — the endpoint decides whether concurrent commits survive, and
+  `limitations.md` carries a two-command probe for checking yours;
+- **endpoint addressing on Azure** — Azurite puts the account in the URL path where a real account has
+  it in the host;
+- **the S3 error body** — real Amazon S3's 403 carries an `<AWSAccessKeyId>` element that MinIO's does
+  not, so the redaction covering it is pinned by a hand-fed message
+  (`DeltaErrorsTests.Translate_never_leaks_an_access_key_id_out_of_an_s3_xml_error_body`) rather than
+  by a container test, which could not reach the shape.
 
 ## Versions these facts were measured against
 

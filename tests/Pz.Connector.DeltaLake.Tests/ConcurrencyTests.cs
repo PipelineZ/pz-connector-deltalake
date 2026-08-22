@@ -69,16 +69,8 @@ public class ConcurrencyTests
         new() { ["root"] = "s3://b/d", ["region"] = "us-east-1", ["use_ssl"] = true },
     ];
 
-    /// <summary>Four sinks, one S3 table, one gate: every session is opened and filled first, then all
-    /// four commits are released together, so they contend for the same next version rather than
-    /// queueing. Three rounds, because a race that only sometimes overlaps would make one round's pass
-    /// mean nothing.
-    ///
-    /// The assertion is deliberately not "all four succeed": that would pin delta-rs's internal retry
-    /// rather than the property a user depends on. What is pinned is that the table afterwards holds
-    /// exactly the rows of the committers that reported success — no commit reported and then lost —
-    /// and that a committer that failed did so transiently.</summary>
-    /// <summary>The same race on local disk, where it needs no docker and runs on every leg.</summary>
+    /// <summary>The same race the S3 suite runs, on local disk, where it needs no docker and runs on
+    /// every leg.</summary>
     [Fact]
     public async Task Concurrent_appends_to_one_local_table_never_lose_a_commit()
     {
@@ -98,10 +90,15 @@ public class ConcurrencyTests
         }
     }
 
-    /// <summary>Opens four sessions against one table, releases every commit at once, and asserts the
-    /// table afterwards holds exactly what the successful committers wrote. Gate-based, not
-    /// clock-based: nothing here sleeps, and the overlap comes from a TaskCompletionSource every
-    /// committer is already waiting on.</summary>
+    /// <summary>Opens four sessions against one table, fills them, then releases every commit at once
+    /// so they contend for the same next version rather than queueing. Gate-based, not clock-based:
+    /// nothing here sleeps, and the overlap comes from a TaskCompletionSource every committer is
+    /// already waiting on.
+    ///
+    /// The assertion is deliberately not "all four succeed": that would pin delta-rs's internal retry
+    /// rather than the property a user depends on. What is pinned is that the table afterwards holds
+    /// exactly the rows of the committers that reported success — no commit reported and then lost —
+    /// and that a committer that failed did so transiently.</summary>
     internal static async Task AssertRaceKeepsEveryCommitAsync(
         ConnectorConfig config, string entity, string location, ConnectorConfig? remote)
     {
@@ -177,6 +174,30 @@ public class ConcurrencyTests
         }
     }
 
+    /// <summary>Loads an existing table and appends to it, through storage options the caller chose.
+    /// The path a user actually meets: <c>CreateAsync</c> only ever exercises the version-0 commit,
+    /// and the two failure modes this suite provokes both behave differently on an existing
+    /// table.</summary>
+    internal static Task AppendAsync(string location, Dictionary<string, string> storage) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(
+                new TableOptions { TableLocation = location, StorageOptions = storage }, default);
+            try
+            {
+                using var batch = DeltaTestTable.Rows(100, 5);
+                await table.InsertAsync([batch], DeltaTestTable.Schema,
+                    new InsertOptions { SaveMode = SaveMode.Append }, default);
+            }
+            finally
+            {
+                (table as IDisposable)?.Dispose();
+            }
+
+            return 0;
+        });
+
     internal static Task CreateAsync(string location, Dictionary<string, string> storage) =>
         DeltaBigStack.RunAsync(async () =>
         {
@@ -207,6 +228,7 @@ public class S3ConcurrencyTests(MinioLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         var config = lake.Config();
         for (var round = 0; round < 3; round++)
@@ -215,6 +237,38 @@ public class S3ConcurrencyTests(MinioLake lake)
             await ConcurrencyTests.AssertRaceKeepsEveryCommitAsync(
                 config, entity, MinioLake.Location(entity), config);
         }
+    }
+
+    /// <summary>The only measured way a user's environment breaks every S3 read and write of this
+    /// connector, permanently. <c>AWS_S3_LOCKING_PROVIDER=dynamodb</c> — a variable that lives on in
+    /// shell profiles and container images at any team that used delta-rs's DynamoDB log store before
+    /// — selects that log store, which then fails because this connector supplies no lock table for
+    /// it. It is passed here as a storage option rather than exported into the environment because
+    /// the two reach the same code and only one of them is deterministic in-process: .NET's
+    /// Environment.SetEnvironmentVariable does not reach the native environ on Linux, so an in-process
+    /// env probe measures nothing at all.
+    ///
+    /// Before PZDL0403 covered it this landed on PZDL0404, whose next step names the table's protocol
+    /// version and the incoming schema — so a user whose shell profile broke their run was told to
+    /// inspect their data.</summary>
+    [SkippableFact]
+    public async Task A_locking_provider_in_the_environment_is_named_as_the_cause()
+    {
+        DockerFacts.SkipUnlessDocker();
+        DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
+
+        var clean = DeltaStorageOptions.Build(lake.Config()).ToDictionary(kv => kv.Key, kv => kv.Value);
+        var location = MinioLake.Location("s3_dynamolock");
+        await ConcurrencyTests.CreateAsync(location, clean);
+
+        var diverted = new Dictionary<string, string>(clean) { ["AWS_S3_LOCKING_PROVIDER"] = "dynamodb" };
+        var raw = await Assert.ThrowsAnyAsync<Exception>(() => ConcurrencyTests.AppendAsync(location, diverted));
+
+        var mapped = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
+        Assert.Contains(DeltaErrors.UnsafeConcurrentS3, mapped.Message, StringComparison.Ordinal);
+        Assert.Contains("AWS_S3_LOCKING_PROVIDER", mapped.Message, StringComparison.Ordinal);
+        Assert.False(mapped.IsTransient);
     }
 
     /// <summary>The one way left, in 0.33.0, to reach an S3 commit path with no concurrency guarantee:
@@ -228,16 +282,29 @@ public class S3ConcurrencyTests(MinioLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
-        var storage = DeltaStorageOptions.Build(lake.Config()).ToDictionary(kv => kv.Key, kv => kv.Value);
-        storage["AWS_CONDITIONAL_PUT"] = "disabled";
+        var clean = DeltaStorageOptions.Build(lake.Config()).ToDictionary(kv => kv.Key, kv => kv.Value);
+        var storage = new Dictionary<string, string>(clean) { ["AWS_CONDITIONAL_PUT"] = "disabled" };
 
-        var raw = await Assert.ThrowsAnyAsync<Exception>(() =>
-            ConcurrencyTests.CreateAsync(MinioLake.Location("s3_nocondput"), storage));
+        // Both the version-0 commit and a later one. Only the second says anything about the path an
+        // ordinary run takes -- a create could have had its own mechanism -- and a rename fallback,
+        // if delta-rs had one, is exactly what a version>0 commit would have used here.
+        var created = MinioLake.Location("s3_nocondput_create");
+        var existing = MinioLake.Location("s3_nocondput_append");
+        await ConcurrencyTests.CreateAsync(existing, clean);
 
-        var mapped = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
-        Assert.Contains(DeltaErrors.UnsafeConcurrentS3, mapped.Message, StringComparison.Ordinal);
-        Assert.False(mapped.IsTransient);
-        Assert.Contains("AWS_S3_ALLOW_UNSAFE_RENAME", mapped.Message, StringComparison.Ordinal);
+        foreach (var attempt in new Func<Task>[]
+        {
+            () => ConcurrencyTests.CreateAsync(created, storage),
+            () => ConcurrencyTests.AppendAsync(existing, storage),
+        })
+        {
+            var raw = await Assert.ThrowsAnyAsync<Exception>(attempt);
+            var mapped = DeltaErrors.Translate(raw, DeltaOperationKind.Write, "append of output 'orders'", []);
+            Assert.Contains(DeltaErrors.UnsafeConcurrentS3, mapped.Message, StringComparison.Ordinal);
+            Assert.False(mapped.IsTransient);
+            Assert.Contains("AWS_S3_ALLOW_UNSAFE_RENAME", mapped.Message, StringComparison.Ordinal);
+        }
     }
 }

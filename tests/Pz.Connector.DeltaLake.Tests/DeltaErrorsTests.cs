@@ -121,6 +121,95 @@ public class DeltaErrorsTests
         Assert.Contains("PZDL0401", ex.Message);
     }
 
+    // Real Amazon S3's 403 body for a wrong secret, verbatim. MinIO's body omits <AWSAccessKeyId> and
+    // <StringToSign> entirely, so the integration tripwire in MinioTests CANNOT reach this shape --
+    // it passed for as long as the redactor covered only name=value because the store it runs against
+    // never produces the other shape. This is the fact that can fire.
+    [Fact]
+    public void Translate_never_leaks_an_access_key_id_out_of_an_s3_xml_error_body()
+    {
+        const string Body =
+            "Error performing GET https://bucket.s3.amazonaws.com/t/_delta_log/_last_checkpoint - " +
+            "Server returned non-2xx status code: 403 Forbidden: " +
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>SignatureDoesNotMatch</Code>" +
+            "<Message>The request signature we calculated does not match the signature you provided.</Message>" +
+            "<AWSAccessKeyId>AKIAIOSFODNN7EXAMPLE</AWSAccessKeyId>" +
+            "<StringToSign>AWS4-HMAC-SHA256\n20260822T000000Z\n20260822/us-east-1/s3/aws4_request</StringToSign>" +
+            "<SignatureProvided>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</SignatureProvided>" +
+            "<BucketName>bucket</BucketName><RequestId>18CE059D999CE9DA</RequestId></Error>";
+
+        var ex = DeltaErrors.Translate(
+            new DeltaLakeException(Body, 1), DeltaOperationKind.Write, "append of output 'orders'", []);
+
+        Assert.DoesNotContain("AKIAIOSFODNN7EXAMPLE", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS4-HMAC-SHA256", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("0123456789abcdef", ex.Message, StringComparison.Ordinal);
+
+        // The operational half survives: which bucket, which code, which request. Without it a storage
+        // failure names nothing an operator can act on, and run artifacts carry this message verbatim.
+        Assert.Contains("SignatureDoesNotMatch", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("bucket", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("18CE059D999CE9DA", ex.Message, StringComparison.Ordinal);
+    }
+
+    // An Azure XML error body is the same shape with different element names. Nothing in it is a
+    // credential today, so this pins that the XML rule does not eat the diagnosis.
+    [Fact]
+    public void Translate_keeps_the_diagnosis_in_an_azure_xml_error_body()
+    {
+        const string Body =
+            "Server returned non-2xx status code: 403 Forbidden: <?xml version=\"1.0\"?><Error>" +
+            "<Code>AuthorizationFailure</Code><Message>Server failed to authenticate the request. " +
+            "RequestId:6c29cdce-54da-488d-8589-cac712cdf407</Message></Error>";
+
+        var ex = DeltaErrors.Translate(
+            new DeltaLakeException(Body, 1), DeltaOperationKind.Write, "append of output 'orders'", []);
+
+        Assert.Contains("AuthorizationFailure", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("403", ex.Message, StringComparison.Ordinal);
+    }
+
+    // AWS_S3_LOCKING_PROVIDER=dynamodb is the one measured way a user's environment breaks every S3
+    // read and write of this connector permanently. Both wordings are real: a CREATE says the first,
+    // an append and a plain OPEN say the second (S3ConcurrencyTests reaches them end to end). Before
+    // this branch both landed on PZDL0404, whose next step names the table's protocol version and the
+    // incoming schema -- the wrong subsystem entirely.
+    [Theory]
+    [InlineData("Transaction failed: Transaction failed: dynamodb client failed to write log entry")]
+    [InlineData("Generic error: error in DynamoDb")]
+    public void Translate_names_the_locking_provider_that_diverted_the_commit(string message)
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "append", []);
+        Assert.Contains(DeltaErrors.UnsafeConcurrentS3, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("AWS_S3_LOCKING_PROVIDER", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsTransient);
+    }
+
+    // The same diversion breaks a READ too -- the table cannot even be opened -- so the branch is not
+    // gated on the operation kind, and this pins that a read does not fall through to PZDL0201 with no
+    // mention of the variable that caused it.
+    [Fact]
+    public void Translate_names_the_locking_provider_on_a_read_as_well_as_a_write()
+    {
+        var ex = DeltaErrors.Translate(
+            new DeltaLakeException("Generic error: error in DynamoDb", 1), DeltaOperationKind.Read, "read", []);
+        Assert.Contains(DeltaErrors.UnsafeConcurrentS3, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(DeltaErrors.TableUnreadable, ex.Message, StringComparison.Ordinal);
+    }
+
+    // The ordering teeth for the branch above: a CORRECTLY configured DynamoDB deployment that is
+    // merely throttled must keep the transient classification. Both markers appear in one message, and
+    // the transient check runs first.
+    [Theory]
+    [InlineData("DynamoDb error: ThrottlingException in DynamoDb")]
+    [InlineData("Generic error: error in DynamoDb: Provisioned table throughput exceeded")]
+    public void Translate_keeps_a_throttled_dynamodb_failure_transient(string message)
+    {
+        var ex = DeltaErrors.Translate(new DeltaLakeException(message, 1), DeltaOperationKind.Write, "commit", []);
+        Assert.True(ex.IsTransient, ex.Message);
+        Assert.Contains(DeltaErrors.CommitConflict, ex.Message, StringComparison.Ordinal);
+    }
+
     // The rename refusal's own wording ends "...to opt out of support for concurrent writers", and
     // "concurrent" is a bare conflict marker — so before PZDL0403 existed as a branch, this permanent
     // misconfiguration was reported as a retryable commit race and the engine would have retried a run

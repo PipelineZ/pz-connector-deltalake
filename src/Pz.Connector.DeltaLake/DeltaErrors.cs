@@ -64,15 +64,27 @@ internal static class DeltaErrors
     // Write, runtime.
     public const string CommitConflict = "PZDL0401";
     public const string DuplicateMergeKeys = "PZDL0402";
-    /// <summary>An S3 commit that could not be made safe against a second writer. delta-rs 0.33.0
-    /// commits to s3:// with a conditional PUT and never with a rename (measured — see
-    /// <see cref="DeltaStorageOptions"/>), so this is not reachable through the storage options this
-    /// connector builds; it is reachable through the ones a user's ENVIRONMENT contributes, and through
-    /// a future delta-rs whose default moves. It exists as a code of its own rather than as another
-    /// PZDL0404 because the alternative classification is worse than generic: the library's own
-    /// wording for the rename refusal says "concurrent writers", which the conflict markers below match
-    /// — so without this branch a permanent configuration error is reported as a retryable commit race
-    /// and the engine retries a run that can never succeed.</summary>
+    /// <summary>An S3 commit that did not go through the commit path this connector configures.
+    /// delta-rs 0.33.0 commits to s3:// with a conditional PUT and never with a rename (measured — see
+    /// <see cref="DeltaStorageOptions"/>), and that is what makes a second writer safe; anything that
+    /// replaces or removes that path is this code. Two causes reach it, and they differ in how:
+    /// <list type="bullet">
+    /// <item><description>A commit path with no concurrency guarantee left —
+    /// <see cref="UnsafeS3CommitMarkers"/>. Not reachable through the storage options this connector
+    /// builds, and not through the environment either (the explicit pin wins — measured). It is a
+    /// backstop against a delta-rs whose default moves.</description></item>
+    /// <item><description>A commit DIVERTED to delta-rs's DynamoDB locking log store —
+    /// <see cref="DivertedS3LogStoreMarkers"/>. Reachable, and the only measured way a user's
+    /// environment can break every S3 read and write of this connector permanently:
+    /// <c>AWS_S3_LOCKING_PROVIDER=dynamodb</c> selects that log store, and it then fails because this
+    /// connector configures no lock table for it.</description></item>
+    /// </list>
+    /// A code of its own rather than another PZDL0404 for two independent reasons. PZDL0404's next
+    /// step names the table's protocol version and the incoming schema, neither of which has anything
+    /// to do with either cause. And the rename refusal's own wording says "concurrent writers", which
+    /// the conflict markers below match — so without a branch ahead of them, a permanent configuration
+    /// error is reported as a retryable commit race and the engine retries a run that can never
+    /// succeed.</summary>
     public const string UnsafeConcurrentS3 = "PZDL0403";
     public const string WriteFailed = "PZDL0404";
 
@@ -123,6 +135,22 @@ internal static class DeltaErrors
     /// report a permanent misconfiguration as a race worth retrying.</summary>
     private static readonly string[] UnsafeS3CommitMarkers =
         ["requires a lockclient", "conditional put is disabled"];
+
+    /// <summary>Bare substrings identifying a commit diverted to delta-rs's DynamoDB locking log
+    /// store. Both are literal strings confirmed shipped in libdelta_rs_bridge.so and both were
+    /// reproduced against a real MinIO with <c>AWS_S3_LOCKING_PROVIDER=dynamodb</c> set: a CREATE
+    /// answers "Transaction failed: … dynamodb client failed to write log entry", while an append and
+    /// a plain table OPEN both answer "Generic error: error in DynamoDb". The open failing is why this
+    /// branch is not gated on <see cref="DeltaOperationKind"/> — the variable breaks reads as well as
+    /// writes, and the remedy is the same sentence either way.
+    ///
+    /// Matched AFTER <see cref="TransientStorageMarkers"/>, and that order is load-bearing in the
+    /// opposite direction from <see cref="UnsafeS3CommitMarkers"/>'s: the DynamoDB lock client's own
+    /// throttling wording ("ThrottlingException", "Provisioned table throughput exceeded") is
+    /// genuinely retryable, and a DynamoDB deployment that IS configured correctly must keep getting
+    /// the transient classification rather than this permanent one.</summary>
+    private static readonly string[] DivertedS3LogStoreMarkers =
+        ["error in dynamodb", "dynamodb client failed to write log entry"];
 
     /// <summary>Bare substrings that identify an optimistic-concurrency loss. "already exists" is
     /// deliberately absent: delta-rs uses that exact phrase both for a version-conflict retry AND for
@@ -219,6 +247,15 @@ internal static class DeltaErrors
     private static readonly Regex BoxTableRun = new(
         @"(?m)(?:^[ \t]*[|+][-+| ][^\n]*\n?)+", RegexOptions.Compiled);
 
+    /// <summary>The words that make a field name credential-shaped, shared by the two shapes a
+    /// credential reaches this connector in: <see cref="SecretShapedKeyValue"/> (an option echo, a
+    /// connection string) and <see cref="SecretShapedXmlElement"/> (an S3 or Azure XML error body).
+    /// One list, so a word added for one shape is never missing from the other — which is exactly how
+    /// the XML shape came to be uncovered.</summary>
+    private const string SecretWords =
+        "secret|password|passwd|client.?secret|session.?token|sas.?token|connection.?string|" +
+        "credential|bearer|sig(?:nature)?|token|key";
+
     /// <summary>Strips anything shaped like a credential out of a third-party message before it reaches
     /// a user-visible error. delta-rs is free to put storage options in its own error text; this
     /// connector is not free to pass them on. The keyword sits inside <c>[a-z0-9_]*...[a-z0-9_]*</c>
@@ -231,9 +268,30 @@ internal static class DeltaErrors
     /// captured group is the key name, kept in the replacement so the message still says which field
     /// was redacted without saying what it held.</summary>
     private static readonly Regex SecretShapedKeyValue = new(
-        @"(?i)\b([a-z0-9_]*(?:secret|password|passwd|client.?secret|session.?token|sas.?token|" +
-        @"connection.?string|credential|bearer|sig(?:nature)?|token|key)[a-z0-9_]*)\s*[=:]\s*" +
-        @"(?:'[^']*'|""[^""]*""|\S+)",
+        $@"(?i)\b([a-z0-9_]*(?:{SecretWords})[a-z0-9_]*)\s*[=:]\s*(?:'[^']*'|""[^""]*""|\S+)",
+        RegexOptions.Compiled);
+
+    /// <summary>The same alphabet in the OTHER shape a credential arrives in: an XML element. S3 and
+    /// Azure both answer a rejected request with an XML error body, and delta-rs passes that body
+    /// through into its own message verbatim, so a redactor that only understands <c>name=value</c>
+    /// covers one of the two shapes this connector actually meets.
+    ///
+    /// Real Amazon S3's 403 for a wrong secret carries
+    /// <c>&lt;AWSAccessKeyId&gt;AKIA…&lt;/AWSAccessKeyId&gt;</c> and
+    /// <c>&lt;StringToSign&gt;…&lt;/StringToSign&gt;</c>; MinIO's body omits both, which is why no
+    /// container test in this repository can reach the shape and why
+    /// <see cref="SecretShapedKeyValue"/> alone looked sufficient for as long as it did.
+    /// DeltaErrorsTests feeds the real AWS body directly.
+    ///
+    /// The element-name character class is wider than the key=value one — element names carry
+    /// namespace colons, dots and dashes that an env-var-style option key never does. Redaction is by
+    /// backreference, so an opening tag only ever silences its OWN closing tag. Over-redaction is the
+    /// safe direction, as everywhere else in this file: S3's own <c>&lt;Key&gt;</c> element (the
+    /// object path, not a credential) matches the bare <c>key</c> catch-all and is silenced too. That
+    /// costs nothing — every message carrying it also carries the same path inside the request URL,
+    /// which is not an XML element and is left alone.</summary>
+    private static readonly Regex SecretShapedXmlElement = new(
+        $@"(?is)<([a-z0-9_:.\-]*(?:{SecretWords})[a-z0-9_:.\-]*)>.*?</\1>",
         RegexOptions.Compiled);
 
     /// <summary>Matches userinfo embedded in a URL (<c>scheme://user:pass@host</c>) — the shape a
@@ -377,6 +435,17 @@ internal static class DeltaErrors
                 "no action needed if retries are configured; otherwise re-run", ex);
         }
 
+        if (DivertedS3LogStoreMarkers.Any(m => raw.Contains(m, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Fail(UnsafeConcurrentS3,
+                $"the delta {operation} was routed through delta-rs's DynamoDB locking log store, " +
+                $"which this connector never configures and cannot supply a lock table for ({raw})",
+                "remove AWS_S3_LOCKING_PROVIDER from the environment this run inherits — it is the " +
+                "only thing that selects that log store, and this connector does not need it: its " +
+                "commits use a conditional PUT, which is safe against a second writer with no lock " +
+                "table at all", ex);
+        }
+
         // TableUnreadable (PZDL0201) exists specifically for the read path; an unrecognized write
         // failure has nowhere else to land but WriteFailed (PZDL0404).
         var fallbackCode = kind is DeltaOperationKind.Read ? TableUnreadable : WriteFailed;
@@ -392,6 +461,10 @@ internal static class DeltaErrors
         var redacted = InvalidDataPreview.Replace(message, "$1 <redacted>");
         redacted = InvalidDataValue.Replace(redacted, "$1 <redacted>");
         redacted = BoxTableRun.Replace(redacted, "<redacted>\n");
+
+        // XML before the scalar shapes: an error body is a CONTAINER, and silencing the element whole
+        // also removes anything inside it that a later pattern would otherwise have had to recognize.
+        redacted = SecretShapedXmlElement.Replace(redacted, "<$1><redacted></$1>");
 
         redacted = UrlEmbeddedCredential.Replace(redacted, "://<redacted>@");
         redacted = BearerTokenValue.Replace(redacted, "Bearer <redacted>");

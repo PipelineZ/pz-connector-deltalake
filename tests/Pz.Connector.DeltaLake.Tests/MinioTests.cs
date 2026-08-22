@@ -24,6 +24,7 @@ public class MinioTests(MinioLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
         Skip.IfNot(await TestNetwork.CanInstallDuckDbExtensionsAsync(),
             "the duckdb delta extension could not be installed");
 
@@ -44,6 +45,7 @@ public class MinioTests(MinioLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         const string Entity = "s3_strategies";
         var config = lake.Config();
@@ -80,12 +82,17 @@ public class MinioTests(MinioLake lake)
     /// fact would pass with redaction removed. It is here because the message is third-party text this
     /// connector does not control, a future delta-rs or object_store is free to start echoing the
     /// storage options it was given, and the assertion that would catch that has to already exist.
-    /// DeltaErrorsTests carries the facts that prove Redact actually removes a credential.</summary>
+    /// DeltaErrorsTests carries the facts that prove Redact actually removes a credential — including
+    /// <c>Translate_never_leaks_an_access_key_id_out_of_an_s3_xml_error_body</c>, which feeds real
+    /// Amazon S3's 403 body. That shape carries the access key id in an XML ELEMENT, which the
+    /// name=value redactor never covered and which MinIO's own 403 body does not contain, so it could
+    /// only ever be reached by a hand-fed message.</summary>
     [SkippableFact]
     public async Task A_rejected_credential_is_reported_without_the_secret_in_the_message()
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         const string WrongSecret = "pzdl-not-the-real-secret-3f8a1c9e";
         var config = lake.Config(WrongSecret);
@@ -106,6 +113,7 @@ public class MinioTests(MinioLake lake)
     {
         DockerFacts.SkipUnlessDocker();
         DockerFacts.SkipIfOffline();
+        lake.SkipIfUnavailable();
 
         var written = await ObjectStoreLake.WriteAsync(
             lake.Config(), Spec("s3_goodcred", "append"), DeltaTestTable.Rows(0, 5));
@@ -116,8 +124,12 @@ public class MinioTests(MinioLake lake)
     private static OutputSpec Spec(string entity, string mode) =>
         new("lake", entity, mode, "fail_on_change", new Dictionary<string, object?>());
 
-    /// <summary>Message plus every inner message: a secret that survived into an inner delta-rs
-    /// exception is still a secret in a run artifact, because pz renders inner exceptions.</summary>
+    /// <summary>Message plus every inner message. Only the OUTER message reaches anything a user sees:
+    /// pz writes <c>Error.Message</c> into run_results.json and publishes <c>Error?.Message</c> onto
+    /// the NDJSON stream, and nothing in it walks InnerException. The inner ones are asserted anyway
+    /// because they cost nothing and because the outer message is BUILT from the inner one — a
+    /// credential visible in the inner text is a credential that the next wording change upstream can
+    /// carry outward.</summary>
     private static string Flatten(Exception ex)
     {
         var text = new System.Text.StringBuilder();
