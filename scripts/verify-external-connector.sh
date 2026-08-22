@@ -287,8 +287,16 @@ sed 's/^/  /' "${REPORT}"
 grep -q 'last_placed' "${REPORT}" || {
   echo "FAIL: the report carries no last_placed column; the timestamp column did not round-trip" >&2
   cat "${REPORT}" >&2; exit 1; }
-grep -q '2026-01-03 23:59:00' "${REPORT}" || {
-  echo "FAIL: the report's last_placed value did not survive the Delta round trip" >&2
+# Every group's max, as a full date AND time-of-day. Deliberately not an exact literal: the CSV
+# writer renders a timestamp in the RUNNER's local zone (measured -- 23:59:00 UTC comes out
+# "2026-01-04 01:59:00+02" under TZ=Europe/*), so pinning one string would pass in CI and fail on a
+# developer's machine. What has to be true regardless of the zone is that three rows came back
+# carrying a time of day: a write that was refused produces no report at all, a column that was
+# dropped produces empty cells, and a value truncated to a date loses the HH:MM:SS.
+TS_ROWS="$(grep -cE ',2026-01-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "${REPORT}" || true)"
+[[ "${TS_ROWS}" -eq 3 ]] || {
+  echo "FAIL: ${TS_ROWS} of 3 report rows carry a last_placed timestamp; the timestamp column did" >&2
+  echo "      not survive the Delta round trip" >&2
   cat "${REPORT}" >&2; exit 1; }
 
 echo "-- Asserting a second restore is byte-identical (determinism) --"
