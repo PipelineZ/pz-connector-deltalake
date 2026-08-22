@@ -52,6 +52,13 @@ Three things this project needs that a `localfiles`-only project does not:
 - **A `delta_scan` read** — `orders_report` never pulls Delta rows into .NET; DuckDB scans the table
   directly and aggregates in place.
 
+**What a green run here does NOT prove.** Through pz,
+`ArrowInterop.NormalizeNativeArrowSchema` forces every field `nullable: true` before a batch reaches
+a sink, so running this sample exercises **none** of the connector's nullability rules — not the
+`NOT NULL`-addition refusal, not its `replace` exemption, not the pre-existing-column mirror. Their
+only coverage is the connector's own test suite. This sample proves the path works; it does not
+prove every guard on the path ran.
+
 It deliberately declares no `partition_by:`. That is not a simplification — pz reads `partition_by`
 as a calendar-token path template and refuses it with `PZ0219` for a store that partitions by column
 value, so a Delta table written through pz is unpartitioned and a merge against it scans the whole

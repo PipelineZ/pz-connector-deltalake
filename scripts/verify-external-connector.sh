@@ -17,6 +17,11 @@
 # Two feed mechanisms are in play and they are not the same one. `dotnet tool install` reads the
 # NuGet.Config written below; `pz restore` never reads NuGet.Config at all -- its feeds come from
 # --feeds, else PZ_FEEDS, else nuget.org -- so the local feed is passed to it explicitly.
+#
+# NEEDS ROUGHLY 1 GB OF FREE SPACE UNDER TMPDIR. The work directory holds a 222 MB download, a cold
+# package cache, an SDK publish and the materialized package. Where /tmp is a small tmpfs this dies
+# inside `dotnet tool install` with an opaque "Disk quota exceeded"; run it there as
+# `TMPDIR=/var/tmp scripts/verify-external-connector.sh`.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,7 +59,11 @@ VERSION="$(basename "${PKG}" .nupkg | sed 's/^Pz\.Connector\.DeltaLake\.//')"
 echo "packed ${VERSION}"
 
 echo "-- Asserting the manifest is at the nupkg root --"
-unzip -l "${PKG}" | grep -q ' pz.connector.json$' || {
+# The listing is captured before it is searched, deliberately. `unzip -l | grep -q` under `pipefail`
+# reports the pipeline as failed when grep exits early on a match and unzip dies of SIGPIPE (141) --
+# a FAIL on a package that does carry the manifest.
+PKG_LISTING="$(unzip -l "${PKG}")"
+grep -q ' pz.connector.json$' <<<"${PKG_LISTING}" || {
   echo "FAIL: pz.connector.json is not at the nupkg root; the host cannot gate protocol compatibility" >&2
   exit 1
 }
@@ -132,9 +141,19 @@ BRIDGED=0
 #     host, i.e. correct -- while the SDK takes 0.21.1's netstandard2.0 build. DeltaLake.Net is pinned
 #     to one version by this connector's own PackageReference, so for DeltaLake.dll the two sides
 #     agree on the version and any difference IS the target framework.
+# nullglob, and then an assertion: an unmatched glob would otherwise hand the loop one bogus
+# iteration for a path that does not exist, and an empty lib/ -- a materialization that produced
+# nothing at all -- has to be a failure here rather than a silently skipped comparison.
+shopt -s nullglob
+LIB_DLLS=("${LIB_DIR}"/*.dll)
+shopt -u nullglob
+[[ ${#LIB_DLLS[@]} -gt 0 ]] || {
+  echo "FAIL: no managed assemblies under ${LIB_DIR#"${PROJ_DIR}/"}; the package materialized empty" >&2
+  exit 1; }
+
 BAD_DLLS=()
 VERSION_NOTES=0
-for dll in "${LIB_DIR}"/*.dll; do
+for dll in "${LIB_DLLS[@]}"; do
   name="$(basename "${dll}")"
   # This connector's own assembly is built here, not resolved from a feed: the packed copy and the
   # published copy are two builds of the same source and never compare equal. Nothing to learn.
@@ -166,8 +185,12 @@ if [[ "${VERSION_NOTES}" == "1" ]]; then
   echo "  way that puts a net4x build first in the zip." >&2
 fi
 
-# (b) Native libraries: right file, right place. ConnectorLoadContext.LoadUnmanagedDll probes
-#     <package>/native/ and nowhere else, and the RID story repeats the TFM one one directory over.
+# (b) Native libraries: the right file, on the right path, and BOTH questions asked about the ONE
+#     directory that decides loadability. ConnectorLoadContext.LoadUnmanagedDll probes
+#     <package>/native/ and nowhere else. Asserting only that a file of the right NAME is there
+#     would green a partially-fixed pz that placed the wrong architecture on the probe path, so the
+#     probe-path copy is compared byte-for-byte against the SDK-resolved one. Existence is not the
+#     question; loadability is.
 for lib in libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
   [[ -f "${SDK_ASSETS}/${lib}" ]] || {
     echo "FAIL: DeltaLake.Net ships no ${lib} for ${RID}; this host's RID is not one it supports." >&2
@@ -197,6 +220,12 @@ for lib in libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
     echo "    cause: PackageMaterializer flattens a transitive package's lib/ into the connector" >&2
     echo "           package's own lib/, but never its native/." >&2
     BRIDGED=1
+  elif ! cmp -s "${PROBE_DIR}/${lib}" "${SDK_ASSETS}/${lib}"; then
+    echo "  UPSTREAM GAP (pz finding 20, ON THE PROBE PATH): ${lib} is where the ALC looks, but it" >&2
+    echo "    is not this host's build -- the file dlopen would take is the wrong architecture." >&2
+    echo "    on the probe path: $(stat -Lc%s "${PROBE_DIR}/${lib}") bytes" >&2
+    echo "    SDK-resolved ${RID}: $(stat -Lc%s "${SDK_ASSETS}/${lib}") bytes" >&2
+    BRIDGED=1
   fi
 done
 
@@ -221,9 +250,16 @@ if [[ "${BRIDGED}" == "1" ]]; then
   cp "${SDK_ASSETS}/libdelta_rs_bridge.so" "${SDK_ASSETS}/libdelta_kernel_ffi.so" "${PROBE_DIR}/"
 fi
 
+# The one assertion a broken state cannot satisfy: whatever sits on the probe path now -- put there
+# by pz or staged by the bridge above -- must be byte-identical to the RID-correct library, or
+# nothing below this line means anything.
 for lib in libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
   [[ -f "${PROBE_DIR}/${lib}" ]] || { echo "FAIL: ${lib} still absent from the probe path" >&2; exit 1; }
-  echo "  native/${lib} ($(stat -Lc%s "${PROBE_DIR}/${lib}") bytes)"
+  cmp -s "${PROBE_DIR}/${lib}" "${SDK_ASSETS}/${lib}" || {
+    echo "FAIL: ${lib} is on the probe path but is not the ${RID} build; the ALC would dlopen the" >&2
+    echo "      wrong architecture. Nothing after this point would be a valid result." >&2
+    exit 1; }
+  echo "  native/${lib} ($(stat -Lc%s "${PROBE_DIR}/${lib}") bytes, matches the ${RID} build)"
 done
 
 # The lake is a store, not a DAG edge: nothing connects the pipeline that writes it to the pipeline
@@ -269,22 +305,120 @@ rm -f "${PROJ_DIR}/out/report"
 echo "-- Asserting the retry reused the Delta SourceLoad rather than re-extracting --"
 RESULTS="$(find "${PROJ_DIR}/.pz/runs" -name run_results.json -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
 [[ -n "${RESULTS}" ]] || { echo "FAIL: no run_results.json from the retry" >&2; exit 1; }
-grep -q '"provenance": *"reused"' "${RESULTS}" || {
+# The node, not just any node: run_results.json's nodes are flat objects on one line, so the one
+# named for the Delta SourceLoad is extracted first and its own provenance read. Matching
+# "reused" anywhere in the file would also be satisfied by a reused seed-CSV load, which would
+# prove nothing about the Delta table.
+DELTA_NODE="$(grep -o '{[^{}]*"name": *"src_lake__orders"[^{}]*}' "${RESULTS}" | head -1)"
+[[ -n "${DELTA_NODE}" ]] || {
+  echo "FAIL: the retry's run_results.json has no src_lake__orders node at all" >&2
+  echo "      (${RESULTS})" >&2
+  exit 1; }
+grep -q '"provenance": *"reused"' <<<"${DELTA_NODE}" || {
   echo "FAIL: the retry re-extracted from the Delta table instead of reusing the staged load" >&2
-  echo "      (no node in ${RESULTS} carries provenance \"reused\")" >&2
+  echo "      src_lake__orders in ${RESULTS} reads: ${DELTA_NODE}" >&2
   exit 1
 }
 REPORT="$(find "${PROJ_DIR}/out/report" -name '*.csv' | head -1)"
 [[ -n "${REPORT}" ]] || { echo "FAIL: the retry produced no report csv" >&2; exit 1; }
 
+# `pz retry` is a SEPARATE PROCESS, so everything above proves a fresh-process load and nothing about
+# what happens when one process loads this connector's ALC more than once. That case is real: every
+# `pz mcp` tool handler builds its own ConnectorHost and disposes it on the way out
+# (`await using var connectorHost = host;`), so a long-lived MCP session loads and unloads the
+# connector once per call. Native libraries are never unloaded from a process once loaded, so a
+# second load resolving them again is exactly the thing nothing had tested.
+#
+# pz_entity_schema is the cheapest handler that reaches delta-rs: it opens the Delta table and
+# returns "source":"fetched", i.e. GetSchemaAsync really ran through both Rust libraries. Three
+# calls in one server process.
+#
+# Best-effort by design: it needs a JSON-RPC client over stdio, which bash cannot do honestly, so it
+# is skipped with a note where python3 is absent rather than failing the run. Where python3 IS
+# present, a crash or a wrong answer FAILS -- that would be a finding about pz's connector host.
+echo "-- Loading the connector ALC three times in ONE process (pz mcp) --"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  skipped: no python3 on PATH, and this probe needs a stdio JSON-RPC client"
+else
+  PZ="${PZ}" PROJ_DIR="${PROJ_DIR}" timeout 180 python3 - <<'PYPROBE' || {
+import json, os, subprocess, threading, time
+
+pz, proj = os.environ["PZ"], os.environ["PROJ_DIR"]
+p = subprocess.Popen([pz, "mcp"], cwd=proj, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True, bufsize=1)
+# Both pipes are drained concurrently. `pz mcp` parks its console on stderr, so an undrained
+# stderr pipe would fill and block the server mid-session.
+lines, errs = [], []
+threading.Thread(target=lambda: [lines.append(l.strip()) for l in p.stdout], daemon=True).start()
+threading.Thread(target=lambda: [errs.append(l) for l in p.stderr], daemon=True).start()
+
+def send(obj):
+    p.stdin.write(json.dumps(obj) + "\n")
+    p.stdin.flush()
+
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+      "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                 "clientInfo": {"name": "alc-reload-probe", "version": "1"}}})
+time.sleep(3)
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+for call_id in (2, 3, 4):
+    send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
+          "params": {"name": "pz_entity_schema",
+                     "arguments": {"connection": "lake", "entity": "orders"}}})
+    time.sleep(6)
+
+alive = p.poll() is None
+fetched = set()
+for line in lines:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    if msg.get("id") not in (2, 3, 4):
+        continue
+    # The tool's payload is a JSON STRING inside the MCP content block, so it has to be parsed
+    # rather than substring-matched -- json.dumps of the envelope escapes every quote in it, and a
+    # naive `'"source":"fetched"' in dumps(...)` never matches even on a perfectly good response.
+    try:
+        payload = json.loads(msg["result"]["content"][0]["text"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        continue
+    if payload.get("ok") and payload.get("result", {}).get("source") == "fetched":
+        fetched.add(msg["id"])
+p.kill()
+
+if not alive:
+    print("  FAIL: the pz mcp process died while reloading the connector ALC")
+    print("  stderr:", "".join(errs)[-2000:])
+    raise SystemExit(1)
+if fetched != {2, 3, 4}:
+    print(f"  FAIL: only calls {sorted(fetched)} opened the Delta table; expected 2, 3 and 4")
+    print("  stderr:", "".join(errs)[-2000:])
+    raise SystemExit(1)
+print("  three ConnectorHosts built and disposed in one process; all three read the Delta schema")
+print("  through both Rust libraries. Note this shows a repeated fresh-ALC load does not crash --")
+print("  ConnectorHost.DisposeAsync requests Unload() but collection is GC-nondeterministic, so it")
+print("  is NOT evidence that the previous ALC was actually collected.")
+PYPROBE
+    echo "FAIL: the in-process ALC reload probe failed (see above)" >&2; exit 1; }
+fi
+
 echo
 echo "-- What the dependency costs (cold cache, measured, not predicted) --"
-GLOBAL_PACKAGES="$(dotnet nuget locals global-packages --list | sed 's/^[^:]*: *//')"
+# Anchored on the key name rather than "everything before the first colon": the CLI prefixes the
+# line with "info : " on some verbosities, and the loose form would then yield a path that does not
+# exist. The vendor nupkg is what `dotnet pack` and `dotnet publish` above already restored, so its
+# absence means the lookup broke, not that the file is optional -- and this is THE number Step 5
+# exists to publish, so it fails rather than quietly printing one line fewer.
+GLOBAL_PACKAGES="$(dotnet nuget locals global-packages --list | sed -n 's/.*global-packages: *//p' | head -1)"
 VENDOR_NUPKG="${GLOBAL_PACKAGES}/deltalake.net/${DL_VERSION}/deltalake.net.${DL_VERSION}.nupkg"
+[[ -n "${GLOBAL_PACKAGES}" && -f "${VENDOR_NUPKG}" ]] || {
+  echo "FAIL: could not locate the DeltaLake.Net ${DL_VERSION} nupkg to measure the download size." >&2
+  echo "      looked for: ${VENDOR_NUPKG}" >&2
+  echo "      (global-packages resolved to '${GLOBAL_PACKAGES}')" >&2
+  exit 1; }
 echo "  this connector's nupkg:             $(du -h "${PKG}" | cut -f1)"
-if [[ -f "${VENDOR_NUPKG}" ]]; then
-  echo "  DeltaLake.Net ${DL_VERSION} nupkg (all RIDs):  $(du -h "${VENDOR_NUPKG}" | cut -f1)  <- the download"
-fi
+echo "  DeltaLake.Net ${DL_VERSION} nupkg (all RIDs):  $(du -h "${VENDOR_NUPKG}" | cut -f1)  <- the download"
 echo "  pz package cache after restore:     ${CACHE_AFTER_RESTORE}"
 echo "  .pz/packages after restore:         ${PACKAGES_AFTER_RESTORE}"
 echo "  .pz/packages after bridging:        $(du -shL "${PROJ_DIR}/.pz/packages" | cut -f1)"

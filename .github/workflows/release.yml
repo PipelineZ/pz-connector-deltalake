@@ -34,11 +34,16 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
-      # The same invocation ci.yml's ubuntu leg runs, deliberately. Releasing is not the moment to
-      # widen coverage past what merge already proved on this commit.
+      # PZ_TESTS_OFFLINE=1 here, where ci.yml deliberately does NOT set it. Releasing is not the
+      # moment to depend on network reachability: a nuget.org blip or a failed DuckDB extension
+      # download would block a release on a commit CI already passed green. The 55 tests the flag
+      # skips are exactly the ones whose extra failure mode is the network, and ci.yml ran them on
+      # this same commit before it was tagged.
       - run: >
           dotnet test Pz.Connector.DeltaLake.slnx -c Release --no-build
           --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+        env:
+          PZ_TESTS_OFFLINE: '1'
       - run: dotnet pack src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj -c Release -o packages --no-build
       - name: NuGet login (trusted publishing)
         id: login

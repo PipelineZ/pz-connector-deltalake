@@ -10,21 +10,21 @@ Reads via DuckDB's `delta` extension; writes (append/replace/merge) via delta-rs
 extracts the wrong target framework and the wrong RID out of a multi-targeted, multi-RID dependency,
 and never places a dependency's native assets where the connector's load context probes. The causes
 are entirely in pz and are written up, with what each one looks like when it bites, in
-[`docs/installing.md`](docs/installing.md).
+[`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md).
 
 **It is a 222 MB download.** `DeltaLake.Net` ships every RID's Rust libraries in one package, and
-`pz restore` prints nothing while fetching it. It is not hung — wait it out. About 126 MB lands in
-`.pz/packages`, and ~140 MB once pz materializes the right architecture.
+`pz restore` prints nothing while fetching it. It is not hung — wait it out. 126 MB then lands in
+`.pz/packages`, nearly all of it the two Rust libraries.
 
 ## Documentation
 
-- [`docs/installing.md`](docs/installing.md) — the external-connector path, what it costs, and what
+- [`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md) — the external-connector path, what it costs, and what
   currently blocks it
-- [`docs/compatibility.md`](docs/compatibility.md) — what is proven, on which backend, against which
+- [`docs/compatibility.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/compatibility.md) — what is proven, on which backend, against which
   version, and what is merely shipped
-- [`docs/reference/write.md`](docs/reference/write.md) — `merge`, `schema_policy`, partition values,
+- [`docs/reference/write.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/reference/write.md) — `merge`, `schema_policy`, partition values,
   and what a merge costs
-- [`docs/limitations.md`](docs/limitations.md) and [`docs/troubleshooting.md`](docs/troubleshooting.md)
+- [`docs/limitations.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/limitations.md) and [`docs/troubleshooting.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/troubleshooting.md)
 
 `samples/delta-roundtrip/` is a runnable project that seeds a Delta table from a CSV and reads it
 back; `scripts/verify-external-connector.sh` runs it end to end against a locally packed build.

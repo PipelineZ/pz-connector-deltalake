@@ -14,7 +14,10 @@ with Delta.
 in the .nupkg under a prefix alone — `lib/` for managed assemblies, `runtimes/` for native ones — and
 extracts whichever archive entry matches first. The target framework and the RID that pz's resolver
 had already selected are not carried across, so on any package that multi-targets or ships several
-RIDs the wrong file wins, silently. Three consequences, all measured on linux-x64 against
+RIDs the wrong file wins, silently. The discarding starts one step earlier than the materializer:
+`NuGetResolver` computes the nearest target framework and then keeps only the file names it maps to,
+so the information is gone before anything is written to the lock — for the connector's own package
+as much as for its dependencies. Three consequences, all measured on linux-x64 against
 `DeltaLake.Net` 0.33.0:
 
 | what pz materializes | what a `net10.0`/`linux-x64` host needs |
@@ -31,6 +34,11 @@ the .NET 9 one. The second and third surface as a `DllNotFoundException`, or wou
 dependency package's own `native/` directory is never on that path — pz flattens a transitive
 package's `lib/` into the connector package, but not its `native/`.
 
+A fourth consequence has not bitten this connector but is the same defect: that `lib/` flattening
+copies by file name with `overwrite: true`, so two dependencies shipping an assembly of the same name
+silently overwrite each other in the connector's `lib/`. All four are one bug — the lock file stores
+file names where it needs archive paths.
+
 `scripts/verify-external-connector.sh` detects all three by comparing what pz materialized against
 what `dotnet publish -r <rid>` resolves from the same packages, prints each one, and then stages the
 correct assets so the rest of the chain can still be tested. Run it with `PZ_VERIFY_STRICT=1` to make
@@ -39,7 +47,19 @@ it fail on them instead — that is the mode that goes green the day pz fixes th
 **Everything downstream of that works.** With the correct assets in place, on linux-x64 against pz
 0.2.2: the connector ALC loads it, both Rust libraries resolve through the unmanaged-DLL hook, a
 merge writes a Delta table, a `delta_scan` reads it back, and `pz retry` reloads the whole thing in a
-fresh process and reuses the staged Delta extraction instead of re-reading the table.
+fresh process and reuses the staged Delta extraction instead of re-reading the table. Loading the
+connector repeatedly **within one process** does not crash either: three `pz mcp` tool calls in one
+server, each building and disposing its own `ConnectorHost`, each opening the Delta table through
+both Rust libraries. That is what was observed, and it is the whole of it — `ConnectorHost` requests
+`Unload()` on dispose but collection is GC-nondeterministic, so it is not evidence that the previous
+load context was actually collected.
+
+**But a green run there is not blanket validation, and one gap is worth naming.** Through pz,
+`ArrowInterop.NormalizeNativeArrowSchema` forces every field `nullable: true` before a batch reaches
+a sink, so an end-to-end run exercises **none** of this connector's nullability rules — not the
+`NOT NULL`-addition refusal, not its `replace` exemption, not the pre-existing-column mirror. Their
+only coverage is this repository's own test suite. A green `pz run` means the path works; it does not
+mean every guard on the path ran.
 
 ## `root:` must be absolute, so the sample reads it from the environment
 
@@ -78,10 +98,13 @@ Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0:
 | `DeltaLake.Net` nupkg — every RID in one package | **222 MB**, and this is the download |
 | `~/.pz/cache` after one restore | 125 MB |
 | `.pz/packages` as pz materializes it today | 126 MB — and unusable, per the section above |
-| `.pz/packages` with the RID-correct natives instead | ~140 MB (the `linux-x64` native pair is 138 MB of it) |
+| `.pz/packages` after the verify script bridges it | 263 MB — the wrong-architecture pair is still there and the right one sits beside it |
+| the `linux-x64` native pair alone | 138 MB |
 
-Sizes are `du -h`. The design predicted ~143 MB materialized on linux-x64; the `linux-x64` native
-pair alone measures 143 718 640 bytes, so that prediction held.
+Sizes are `du -h` (so MiB), measured, none projected. The 263 MB figure is the bridged state, not
+what a fixed pz would produce: it double-counts the Rust libraries. The design predicted ~143 MB
+materialized on linux-x64 and the `linux-x64` native pair alone measures 143 718 640 bytes, so that
+prediction held.
 
 **`pz restore` looks hung and is not.** A 222 MB download behind a progress-free command is a minute
 or more on a normal connection, and the first thing a new user does after 90 seconds of silence is
