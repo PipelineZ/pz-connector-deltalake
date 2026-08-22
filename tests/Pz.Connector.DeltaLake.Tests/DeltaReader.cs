@@ -235,6 +235,27 @@ internal static class DeltaReader
             }
         });
 
+    /// <summary>The table's Arrow schema as delta-rs reports it after the write. A column NAME cannot
+    /// tell a type that survived the create from one delta-rs normalised on the way in, which is the
+    /// difference a reconcile has to be compared against.</summary>
+    public static Task<Schema> ArrowSchemaAsync(string location) =>
+        DeltaBigStack.RunAsync(async () =>
+        {
+            using var engine = new DeltaEngine(EngineOptions.Default);
+            var table = await engine.LoadTableAsync(new TableOptions { TableLocation = location }, default);
+            try
+            {
+                return table.Schema();
+            }
+            finally
+            {
+                if (table is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
+        });
+
     /// <summary>How many commits the table's transaction log holds. An append that flushes bounded
     /// generations produces more of them than one that buffers the whole write and commits once, which
     /// is the only externally visible difference between the two — a row count cannot tell them

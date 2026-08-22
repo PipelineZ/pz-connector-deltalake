@@ -279,6 +279,18 @@ ROWS="$(($(wc -l < "${REPORT}") - 1))"
 echo "report (${ROWS} rows):"
 sed 's/^/  /' "${REPORT}"
 
+# The TIMESTAMP column, asserted rather than merely carried. pz rewrites every timestamp's Arrow
+# timezone to a spelling delta-rs refuses, so a sample whose columns are all integers, strings and
+# doubles runs this whole script green while the commonest column type in ETL cannot be written at
+# all. The assertion is on the value that came BACK through delta_scan, so it fails if the write was
+# refused, if the column was dropped, or if it round-tripped as something other than a timestamp.
+grep -q 'last_placed' "${REPORT}" || {
+  echo "FAIL: the report carries no last_placed column; the timestamp column did not round-trip" >&2
+  cat "${REPORT}" >&2; exit 1; }
+grep -q '2026-01-03 23:59:00' "${REPORT}" || {
+  echo "FAIL: the report's last_placed value did not survive the Delta round trip" >&2
+  cat "${REPORT}" >&2; exit 1; }
+
 echo "-- Asserting a second restore is byte-identical (determinism) --"
 cp "${PROJ_DIR}/pz.lock.json" "${WORK_DIR}/lock.first"
 (cd "${PROJ_DIR}" && "${PZ}" restore --feeds "${FEED_DIR}" --feeds "https://api.nuget.org/v3/index.json")

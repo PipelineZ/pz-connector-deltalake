@@ -272,6 +272,12 @@ internal sealed class DeltaLakeSink : ISink
     public async ValueTask<ISinkWriteSession> BeginWriteAsync(OutputSpec spec, Schema schema, CancellationToken ct)
     {
         var options = DeltaWriteOptions.From(spec);
+
+        // ONE spelling from here down. pz spells a UTC timestamp's timezone "+00:00" and delta-rs
+        // accepts only "UTC", so the rewrite has to happen before ANYTHING else reads the schema: the
+        // refusal below, the create, the reconcile, the session and every insert must all see the same
+        // types, or the create writes one shape and the reconcile compares another.
+        schema = DeltaArrowTypes.Canonical(schema);
         DeltaTypeSupport.Assert(schema);
 
         var names = schema.FieldsList.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
@@ -445,15 +451,31 @@ internal sealed class DeltaLakeSink : ISink
             }
 
             // The FULL type, not just its ArrowTypeId: Decimal128(38,9) and Decimal128(10,2) share an
-            // id, as do two timestamps differing only in unit or timezone, and delta-rs rejects all
-            // three pairs at insert time. Comparing only the id would let them past a guard whose whole
-            // purpose is to fail first and say which column.
-            var wanted = Describe(existing.DataType);
-            var got = Describe(field.DataType);
+            // id, as do two timestamps differing only in unit, and delta-rs rejects both pairs at
+            // insert time. Comparing only the id would let them past a guard whose whole purpose is to
+            // fail first and say which column.
+            //
+            // The incoming side is compared as delta-rs will STORE it, not as it was offered. A Delta
+            // table does not necessarily come back shaped like the Arrow schema that created it — an
+            // unsigned integer comes back signed, every string encoding comes back utf8 — so comparing
+            // the offered type refuses the very first write to the table this same call has just
+            // created, and leaves an empty table behind for every run after it to fail against.
+            // DeltaArrowTypes.Stored is that mapping, observed against delta-rs rather than assumed.
+            var wanted = DeltaArrowTypes.Describe(existing.DataType);
+            var offered = DeltaArrowTypes.Describe(field.DataType);
+            var got = DeltaArrowTypes.Describe(DeltaArrowTypes.Stored(field.DataType));
             if (!string.Equals(wanted, got, StringComparison.Ordinal))
             {
+                // Both the type the write OFFERS and the type Delta would store it as, whenever they
+                // differ. Naming only the stored one describes the write back to its author as a type
+                // they never wrote; naming only the offered one hides why it does not match a table
+                // that never held that type either.
                 problems.Add(
-                    $"column '{field.Name}' is {wanted} in the table but {got} in the data being written");
+                    $"column '{field.Name}' is {wanted} in the table but {offered} in the data being " +
+                    "written" +
+                    (string.Equals(offered, got, StringComparison.Ordinal)
+                        ? string.Empty
+                        : $", which Delta stores as {got}"));
             }
         }
 
@@ -509,28 +531,6 @@ internal sealed class DeltaLakeSink : ISink
     /// for any other reason, would make a replace partial, leave rows behind that predate an added
     /// column, and make this exemption WRONG — without anyone editing this method.</summary>
     private static bool RowsCanOutliveTheWrite(string mode) => mode != "replace";
-
-    /// <summary>A fully parameterized name for an Arrow type. Apache.Arrow's own <c>Name</c> drops the
-    /// parameters that decide whether two same-id types are actually the same ("decimal128" for any
-    /// precision and scale, "timestamp" for any unit and timezone), and no Arrow type implements value
-    /// equality, so the comparison and the error message both need this.</summary>
-    private static string Describe(IArrowType type) => type switch
-    {
-        Decimal128Type d => $"decimal128({d.Precision}, {d.Scale})",
-        Decimal256Type d => $"decimal256({d.Precision}, {d.Scale})",
-        TimestampType t => $"timestamp[{t.Unit}{(t.Timezone is null ? string.Empty : $", tz={t.Timezone}")}]",
-        Time32Type t => $"time32[{t.Unit}]",
-        Time64Type t => $"time64[{t.Unit}]",
-        DurationType d => $"duration[{d.Unit}]",
-        IntervalType i => $"interval[{i.Unit}]",
-        FixedSizeBinaryType f => $"fixed_size_binary[{f.ByteWidth}]",
-        FixedSizeListType f => $"fixed_size_list<{Describe(f.ValueDataType)}>[{f.ListSize}]",
-        ListType l => $"list<{Describe(l.ValueDataType)}>",
-        LargeListType l => $"large_list<{Describe(l.ValueDataType)}>",
-        MapType m => $"map<{Describe(m.KeyField.DataType)}, {Describe(m.ValueField.DataType)}>",
-        StructType s => $"struct<{string.Join(", ", s.Fields.Select(f => $"{f.Name}: {Describe(f.DataType)}"))}>",
-        _ => type.Name,
-    };
 
     private static async Task DisposeTableAsync(ITable table)
     {

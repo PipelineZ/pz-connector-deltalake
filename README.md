@@ -52,6 +52,7 @@ seed:
         columns:
           id: bigint
           dt: varchar
+          placed_at: timestamp
           amount: double
 
 lake:
@@ -82,7 +83,7 @@ connectors:
 
 ```sql
 INSERT INTO {{ sink('lake', 'orders', strategy: 'merge', keys: ['id']) }}
-select id, dt, amount
+select id, dt, placed_at, amount
 from {{ source('seed', 'orders') }}
 ```
 
@@ -90,7 +91,7 @@ from {{ source('seed', 'orders') }}
 
 ```sql
 INSERT INTO {{ sink('report', 'orders_report', strategy: 'replace', format: 'csv') }}
-select dt, count(*) as orders, sum(amount) as total
+select dt, count(*) as orders, sum(amount) as total, max(placed_at) as last_placed
 from {{ source('lake', 'orders') }}
 group by dt
 order by dt

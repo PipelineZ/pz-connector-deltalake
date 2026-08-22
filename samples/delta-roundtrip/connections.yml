@@ -13,6 +13,11 @@ seed:
         columns:
           id: bigint
           dt: varchar
+          # A TIMESTAMP column, and it is here on purpose rather than for realism. pz rewrites every
+          # timestamp's Arrow timezone to its own spelling before a sink sees the schema, and that
+          # spelling is not the one delta-rs accepts — so a sample with no timestamp column runs the
+          # whole external-connector path green while the commonest column type in ETL is unwritable.
+          placed_at: timestamp
           amount: double
 
 # The Delta lake itself: `root:` says where the place is, and each entity is a table under it.

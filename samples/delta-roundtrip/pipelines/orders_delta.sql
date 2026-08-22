@@ -8,5 +8,5 @@
 -- table rather than the partitions the write touches. Driven directly, the connector partitions and
 -- prunes; through pz today, it cannot be asked to.
 INSERT INTO {{ sink('lake', 'orders', strategy: 'merge', keys: ['id']) }}
-select id, dt, amount
+select id, dt, placed_at, amount
 from {{ source('seed', 'orders') }}

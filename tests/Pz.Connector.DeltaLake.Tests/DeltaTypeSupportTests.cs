@@ -58,6 +58,16 @@ public class DeltaTypeSupportTests(ITestOutputHelper output)
         { "date64", Date64Type.Default },
         { "timestamp_us_utc", new TimestampType(TimeUnit.Microsecond, "UTC") },
         { "timestamp_ns_utc", new TimestampType(TimeUnit.Nanosecond, "UTC") },
+        // The spelling pz ACTUALLY produces for every TIMESTAMP column, and the two other timezone
+        // shapes a producer can offer. delta-rs takes "UTC", an empty timezone and none at all, and
+        // refuses every other string with the same schema error an unsupported type gets -- so the
+        // offset spelling belongs in this observed set even though the sink rewrites it to "UTC"
+        // before this predicate sees it (DeltaArrowTypes.Canonical, pinned by TimestampTimezoneTests).
+        // Without a candidate here, this theory kept agreeing with delta-rs about spellings pz never
+        // sends while saying nothing about the one it always does.
+        { "timestamp_us_zero_offset", new TimestampType(TimeUnit.Microsecond, "+00:00") },
+        { "timestamp_us_named_zone", new TimestampType(TimeUnit.Microsecond, "America/New_York") },
+        { "timestamp_us_empty_tz", new TimestampType(TimeUnit.Microsecond, string.Empty) },
         { "decimal128_38_9", new Decimal128Type(38, 9) },
         { "time32_ms", new Time32Type(TimeUnit.Millisecond) },
         { "time64_us", new Time64Type(TimeUnit.Microsecond) },

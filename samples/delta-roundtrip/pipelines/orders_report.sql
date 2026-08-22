@@ -1,5 +1,5 @@
 INSERT INTO {{ sink('report', 'orders_report', strategy: 'replace', format: 'csv') }}
-select dt, count(*) as orders, sum(amount) as total
+select dt, count(*) as orders, sum(amount) as total, max(placed_at) as last_placed
 from {{ source('lake', 'orders') }}
 group by dt
 order by dt

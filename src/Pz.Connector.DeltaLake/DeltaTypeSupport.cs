@@ -23,6 +23,12 @@ namespace Pz.Connector.DeltaLake;
 /// cref="ArrowTypeId.FixedSizeList"/>), so this is an accepted, documented gap rather than a silent
 /// one; closing it needs its own observed candidates first.
 ///
+/// This predicate answers for the type EXACTLY as spelled, which is why it is applied to a schema
+/// <see cref="DeltaArrowTypes.Canonical(Schema)"/> has already normalised. A timestamp whose timezone
+/// denotes UTC in some other spelling — pz writes <c>"+00:00"</c> on every TIMESTAMP column it produces
+/// — is a spelling delta-rs refuses and this predicate refuses too; the rewrite happens upstream so
+/// that a difference the user can act on is the only thing that reaches an error message.
+///
 /// A DICTIONARY-encoded column returns TRUE here, and that is correct rather than an oversight, but the
 /// reason is worth writing down because it is not obvious. Called against raw delta-rs, a dictionary
 /// column writes fine as an ordinary column and fails the INSERT when delta-rs has to partition by it
@@ -58,6 +64,13 @@ internal static class DeltaTypeSupport
         // end. Since this guard protects the write path (BeginWriteAsync), not the create path, the
         // stricter (insert) observation governs regardless: refused as the connector stands today.
         ArrowTypeId.FixedSizeList => false,
+        // Delta stores every timestamp as an instant in UTC, so delta-rs accepts a timezone of "UTC",
+        // an empty one or none at all and refuses every other string outright — measured, with the
+        // identical "Invalid data type for Delta Lake" schema error a type it has no room for at all
+        // produces. A zone-qualified timestamp is therefore a real refusal and not a spelling: the
+        // spellings that DENOTE UTC are rewritten to "UTC" by DeltaArrowTypes.Canonical before this
+        // predicate ever sees them, so anything left here names a zone Delta cannot carry.
+        ArrowTypeId.Timestamp => ((TimestampType)type).Timezone is not { Length: > 0 } tz || tz == "UTC",
         ArrowTypeId.Struct => ((StructType)type).Fields.All(f => IsWritable(f.DataType)),
         ArrowTypeId.List => IsWritable(((ListType)type).ValueDataType),
         ArrowTypeId.Map => IsWritable(((MapType)type).KeyField.DataType) &&
@@ -73,10 +86,13 @@ internal static class DeltaTypeSupport
             return;
         }
 
-        var named = string.Join(", ", bad.Select(f => $"'{f.Name}' ({f.DataType.Name})"));
+        // The FULLY PARAMETERIZED type, not Arrow's bare Name: "timestamp" alone does not say which
+        // timezone was refused, and the timezone is the whole reason a timestamp is ever refused here.
+        var named = string.Join(", ", bad.Select(f => $"'{f.Name}' ({DeltaArrowTypes.Describe(f.DataType)})"));
         throw DeltaErrors.Fail(DeltaErrors.UnwritableArrowType,
             $"these columns have Arrow types Delta Lake cannot store: {named}",
             "cast them in the pipeline SQL to a supported type — a duration or interval as a numeric " +
-            "count of units, a time-of-day as a string or a timestamp");
+            "count of units, a time-of-day as a string or a timestamp, a timestamp carrying a named " +
+            "or offset time zone as one in UTC, which is the only zone Delta stores an instant in");
     }
 }
