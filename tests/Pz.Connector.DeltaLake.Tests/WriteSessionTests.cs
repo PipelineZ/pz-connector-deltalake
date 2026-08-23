@@ -428,16 +428,82 @@ public class WriteSessionTests
         Assert.Contains("unknown write option 'max_rows_per_group'", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>A bare string is that one column, not a refusal and not an empty list.
+    ///
+    /// This connector used to refuse it, and the reason was sound at the time: its own parser read a
+    /// non-list as NO columns, and an unpartitioned table produced from a declaration asking for a
+    /// partitioned one is a silent, permanent layout mistake — Delta cannot repartition in place.
+    /// PartitionColumns reads a scalar as that column and can never return "nothing" for a value that
+    /// names something, so the failure mode the refusal defended against cannot happen. pz's own
+    /// compiler reads the option the same way, so refusing here would reject a declaration pz had
+    /// already accepted.</summary>
     [Fact]
-    public void A_bare_string_partition_by_is_refused_rather_than_silently_unpartitioned()
+    public void A_bare_string_partition_by_is_that_one_column()
     {
-        // Returning an empty list for a non-list value would produce an unpartitioned table from a
-        // declaration that asked for a partitioned one — a silent, and permanent, layout change.
+        var options = DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = "dt" }));
+
+        Assert.Equal(["dt"], options.PartitionBy);
+    }
+
+    [Fact]
+    public void A_scalar_and_a_single_element_list_declare_the_same_thing() =>
+        Assert.Equal(
+            DeltaWriteOptions.From(new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = "dt" })).PartitionBy,
+            DeltaWriteOptions.From(new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt" } })).PartitionBy);
+
+    /// <summary>A repeated column is a typo, and it used to pass straight through to delta-rs — the
+    /// old parser only checked for blanks. It is the same class of mistake the bare-string refusal
+    /// existed to prevent: a permanent layout produced from a declaration nobody meant.</summary>
+    [Fact]
+    public void A_repeated_partition_column_is_refused()
+    {
         var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
             new OutputSpec("lake", "orders", "append", "fail_on_change",
-                new Dictionary<string, object?> { ["partition_by"] = "dt" })));
+                new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt", "dt" } })));
+
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.Contains("twice", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The old parser called ToString() on every entry, so this declared a column literally
+    /// named "1" and only failed later, inside delta-rs, against a schema with no such column.</summary>
+    [Fact]
+    public void A_partition_entry_that_is_not_a_column_name_is_refused()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "dt", 1 } })));
+
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
         Assert.Contains("partition_by", ex.Message);
-        Assert.Contains("dt", ex.Message);
+    }
+
+    [Fact]
+    public void An_empty_partition_list_is_refused()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = new List<object?>() })));
+
+        Assert.Contains(DeltaErrors.InvalidWriteOption, ex.Message);
+        Assert.Contains("empty list", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Surrounding whitespace is trimmed rather than carried into the table's metadata. It
+    /// used to survive: Reconcile compares declared against actual partition columns with
+    /// SequenceEqual, so " dt " could not match a table partitioned by dt.</summary>
+    [Fact]
+    public void Partition_column_names_are_trimmed()
+    {
+        var options = DeltaWriteOptions.From(
+            new OutputSpec("lake", "orders", "append", "fail_on_change",
+                new Dictionary<string, object?> { ["partition_by"] = new List<object?> { "  dt  " } }));
+
+        Assert.Equal(["dt"], options.PartitionBy);
     }
 
     [Fact]

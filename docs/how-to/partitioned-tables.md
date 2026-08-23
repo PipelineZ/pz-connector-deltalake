@@ -54,8 +54,12 @@ as a write option, alongside `strategy` and `keys`. Two rules:
 - **It is honoured only when the table is CREATED.** A run against a table an earlier run partitioned
   need not repeat it. A run that declares a *different* set than the table has is refused with
   **PZDL0301** — the guard's authority is the table's own partition columns, not this option.
-- **It must be a list.** A bare `partition_by: dt` is **PZDL0108**, not silently read as "no
-  partitioning": a quietly unpartitioned table is a permanent layout mistake.
+- **A name or a list, and they mean the same thing.** `partition_by: dt` and `partition_by: [dt]`
+  are one declaration; order matters for a list, because it is the directory nesting. The option is
+  read by the ABI's `PartitionColumns`, the same parser pz's own compiler uses, so nothing is
+  accepted here that pz rejects or vice versa. An empty list, a repeated column, or an entry that is
+  not a column name is **PZDL0108** — each of those would otherwise produce a layout nobody meant,
+  and Delta cannot repartition a table in place.
 
 ## Choosing partition columns
 
