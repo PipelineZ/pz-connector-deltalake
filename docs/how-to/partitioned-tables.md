@@ -1,15 +1,28 @@
 # Partitioned Delta tables
 
-**Read this first: `partition_by:` cannot be declared through pz today.** pz reads `partition_by:` as
+**Read this first: `partition_by:` cannot be declared through pz 0.2.2.** It reads `partition_by:` as
 ONE column whose value substitutes calendar tokens (`{yyyy}/{MM}/{dd}`) in the sink's `path:`, and
 refuses the option with **PZ0219** when the path carries no such tokens. Delta partitions
 declaratively by column value, with no templated path to route into, so the two meanings never meet:
-**a Delta table written through pz is unpartitioned.**
+**a Delta table written through pz 0.2.2 is unpartitioned.**
 
-Everything below is reachable when the connector is driven directly, through the ABI. It is documented
-because the option exists, because it is the single biggest lever on merge cost, and because a table
-another engine partitioned still reads and writes correctly here — only the *declaration* is out of
-reach.
+Against that version everything below is reachable only by driving the connector directly, through
+the ABI. It is documented because the option exists, because it is the single biggest lever on merge
+cost, and because a table another engine partitioned still reads and writes correctly here — only the
+*declaration* is out of reach.
+
+> [!NOTE]
+> **Fixed in pz 0.3.0**, which this connector requires.
+> [coccor/pz#16](https://github.com/coccor/pz/pull/16) gives `partition_by:` one meaning — the columns
+> an output is partitioned by, a name or a list — and lets `path:` decide who lays them out. No
+> calendar tokens means the destination records its own partitioning, which is what a Delta table
+> does; this connector declares `ConnectorCapabilities.ColumnPartitionedWrites` to say so. Verified
+> against the released 0.3.0: `samples/delta-roundtrip` declares `partition_by: ['dt']` and the table
+> pz writes carries `"partitionColumns":["dt"]` in its transaction log.
+>
+> **Everything below is reachable through pz.** The paragraph above it describes pz 0.2.2, which
+> cannot load this connector at all.
+
 
 ## What partitioning does
 

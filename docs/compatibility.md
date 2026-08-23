@@ -15,7 +15,7 @@ this connector's stack writes was measured off the transaction logs it produces:
 | `minReaderVersion` written | 1 |
 | `minWriterVersion` written | 2 |
 | actions written | `protocol`, `metaData`, `add`, `remove`, `commitInfo` |
-| `txn` (application transaction id) | **never written** — it is what an effectively-once append would need, and pz supplies no attempt identity to put in it |
+| `txn` (application transaction id) | **never written** — it is what an effectively-once append would need. pz 0.3.0's `OutputSpec.Attempt` supplies the identity to put in it, within one run; this connector has not adopted it, so `append` stays at-least-once |
 | partition columns | written, as `partitionColumns` + per-file `partitionValues`; the column is absent from the Parquet file, as the protocol requires |
 | per-file statistics | written: `numRecords`, `minValues`, `maxValues`, `nullCount` |
 | checkpoints | **never written.** Measured: 13 commits, 13 JSON files, no `.checkpoint.parquet`, no `_last_checkpoint` |
@@ -91,7 +91,7 @@ host — is exercised by `scripts/verify-external-connector.sh`, and it is cover
 | the connector ALC loads it, natives and all, once the correct assets are staged | yes, linux-x64 |
 | `merge` write + `delta_scan` read-back through a real `pz run` | yes, linux-x64, local filesystem |
 | `pz retry` reloads the connector and reuses the staged Delta extraction | yes, linux-x64 |
-| `partition_by` | **unreachable through pz** (`PZ0219`; `reference/write.md`) |
+| `partition_by` | **declarable through pz** via `ColumnPartitionedWrites` (`reference/write.md`); unreachable under pz 0.2.2 (`PZ0219`), which cannot load this connector anyway |
 | any platform other than linux-x64 | **not tested** |
 
 **linux-x64 is the only platform anything here has been run on.** `DeltaLake.Net` ships `linux-x64`,

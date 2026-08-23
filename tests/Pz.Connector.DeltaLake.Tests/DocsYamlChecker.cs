@@ -131,19 +131,12 @@ internal static class DocsYamlChecker
                         CheckOptions(directions["write"], DeltaLakeSchemas.WriteOptions, PzWriteNames,
                             $"{file}: entity '{name}' write", problems);
 
-                        // pz reads partition_by as ONE column substituting calendar tokens in the
-                        // sink's path, and refuses it (PZ0219) when the path carries none. Delta
-                        // partitions by column value and has no templated path, so an example that
-                        // declares it in a pz write block fails compilation before this connector is
-                        // reached. It stays a documented write option — reachable when the connector
-                        // is driven directly — but never a pasteable pz example.
-                        if (directions["write"] is IDictionary<object, object> w &&
-                            w.ContainsKey("partition_by"))
-                        {
-                            problems.Add($"{file}: entity '{name}' write declares 'partition_by', " +
-                                         "which pz refuses with PZ0219 on a path carrying no calendar tokens");
-                        }
-
+                        // partition_by used to be refused here: pz read it as one column substituting
+                        // calendar tokens in the sink's path and rejected it (PZ0219) when the path
+                        // carried none, so a documented example declaring it could not be pasted into
+                        // a pz project. pz now reads it as the columns an output is partitioned by --
+                        // a name or a list -- and lets `path:` decide who lays the partitions out, so
+                        // a Delta write declaring it is an ordinary, pasteable example.
                         break;
 
                     default:

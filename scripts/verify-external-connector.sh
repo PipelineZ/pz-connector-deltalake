@@ -69,19 +69,34 @@ grep -q ' pz.connector.json$' <<<"${PKG_LISTING}" || {
 }
 
 echo "-- Writing a NuGet.Config listing the local feed FIRST, then nuget.org --"
+# PZ_TOOL_FEED points the whole chain at a pz built from source rather than the released tool. It is
+# how a fix to pz is verified BEFORE it ships: the gaps this script detects are pz's, so proving one
+# closed means running against a pz that nuget.org does not carry yet. Unset, everything below is the
+# released tool and the released connector ABI.
+PZ_TOOL_FEED_ENTRY=""
+if [[ -n "${PZ_TOOL_FEED:-}" ]]; then
+  [[ -d "${PZ_TOOL_FEED}" ]] || { echo "FAIL: PZ_TOOL_FEED=${PZ_TOOL_FEED} is not a directory" >&2; exit 1; }
+  PZ_TOOL_FEED="$(cd "${PZ_TOOL_FEED}" && pwd)"
+  PZ_TOOL_FEED_ENTRY="    <add key=\"pz-build\" value=\"${PZ_TOOL_FEED}\" />"
+  echo "  pz comes from ${PZ_TOOL_FEED}, not nuget.org"
+fi
 cat > "${NUGET_CONFIG}" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <packageSources>
     <clear />
     <add key="local-feed" value="${FEED_DIR}" />
+${PZ_TOOL_FEED_ENTRY}
     <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
   </packageSources>
 </configuration>
 EOF
 
 echo "-- Installing pz as a tool --"
-dotnet tool install pz --tool-path "${TOOL_DIR}" --configfile "${NUGET_CONFIG}"
+# --version is required for a prerelease: `dotnet tool install` takes the highest STABLE version
+# otherwise, which is the released pz and not the build under test.
+dotnet tool install pz --tool-path "${TOOL_DIR}" --configfile "${NUGET_CONFIG}" \
+  ${PZ_TOOL_VERSION:+--version "${PZ_TOOL_VERSION}"}
 PZ="${TOOL_DIR}/pz"
 [[ -x "${PZ}" ]] || { echo "FAIL: no pz shim at ${PZ}" >&2; exit 1; }
 "${PZ}" --version
@@ -100,7 +115,8 @@ grep -q "^    version: ${VERSION}$" "${PROJ_DIR}/project.yml" || {
 export DELTA_LAKE_ROOT="${PROJ_DIR}/out/lake"
 
 echo "-- pz restore (expect a ~200 MB download; it looks hung and is not) --"
-(cd "${PROJ_DIR}" && "${PZ}" restore --feeds "${FEED_DIR}" --feeds "https://api.nuget.org/v3/index.json")
+(cd "${PROJ_DIR}" && "${PZ}" restore --feeds "${FEED_DIR}" \
+  ${PZ_TOOL_FEED:+--feeds "${PZ_TOOL_FEED}"} --feeds "https://api.nuget.org/v3/index.json")
 
 echo "-- Asserting the lock file was written --"
 [[ -f "${PROJ_DIR}/pz.lock.json" ]] || { echo "FAIL: no pz.lock.json" >&2; exit 1; }

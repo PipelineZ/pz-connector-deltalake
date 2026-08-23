@@ -12,17 +12,17 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
 {
     public ConnectorInfo Info => new("deltalake", "0.1.0", ProtocolVersion.Major);
 
-    /// <summary>PathTemplating is declared for its SINK meaning only — fanning rows out to partition
-    /// buckets via <c>partition_by</c>, which pz refuses with PZ0314 without the flag. Its SOURCE
-    /// meaning (calendar-token path pruning) is not implemented: Delta partitions declaratively by
-    /// column value, so there is no templated read path. Validation rejects calendar tokens in a read
-    /// <c>path:</c> so the flag can never become the silent no-op it exists to prevent.</summary>
+    /// <summary>ColumnPartitionedWrites is what a Delta table's partitioning actually is: the columns
+    /// are recorded in the table's own metadata and there is no path to route rows into. PathTemplating
+    /// is deliberately NOT declared — it means the connector renders pz's calendar tokens into a path,
+    /// which nothing here does in either direction. Validation rejects calendar tokens in a read
+    /// <c>path:</c> for the same reason, so neither flag can become a silent no-op.</summary>
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.NativeScan | ConnectorCapabilities.ColumnPruning |
         ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow |
         ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.Merge |
         ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
-        ConnectorCapabilities.PathTemplating;
+        ConnectorCapabilities.ColumnPartitionedWrites;
 
     public string ConnectionConfigSchema => DeltaLakeSchemas.Connection;
 

@@ -33,7 +33,7 @@ ignored setting. Every problem with a write is reported at once.
 | option | type | default | notes |
 |---|---|---|---|
 | `path` | string | the output's own name | The table's location under `root:`. An absolute path, or one carrying its own scheme, ignores `root:`. |
-| `partition_by` | list of column names | `[]` (unpartitioned) | Honoured only when the table is CREATED; a run against an already-partitioned table need not repeat it, and one that declares a different set than the table has is refused with PZDL0301. Must be a list — a bare string is PZDL0108, because a `partition_by: dt` quietly read as "no partitioning" would be a silent and permanent layout change. **Not declarable through pz today** — see below. |
+| `partition_by` | list of column names | `[]` (unpartitioned) | Honoured only when the table is CREATED; a run against an already-partitioned table need not repeat it, and one that declares a different set than the table has is refused with PZDL0301. Must be a list — a bare string is PZDL0108, because a `partition_by: dt` quietly read as "no partitioning" would be a silent and permanent layout change. Declarable through pz from 0.3.0 on, as a list — the same spelling as here; see below. |
 | `merge_predicate` | string | none | `merge` only. Narrows the merge's target scan. Read the section below before using it: a row it excludes is DUPLICATED, not skipped. |
 | `target_file_bytes` | integer > 0 | `134217728` (128 MiB) | `append` only: the buffered size at which an append flushes a generation, so memory tracks a file rather than the whole write. `replace` and `merge` are defined over their entire input and buffer all of it whatever this says. A value of zero or less is PZDL0108. |
 
@@ -63,7 +63,7 @@ lake:
         merge_predicate: "target.dt >= '2026-01-01'"
 ```
 
-That example omits `partition_by:` on purpose — pz refuses it here (PZ0219), for the reason in
+That example omits `partition_by:` only for brevity — pz 0.2.2 refused it here (PZ0219), for the reason in
 "`partition_by:` cannot be declared through pz today" below. Driven directly, it would sit beside
 `merge_predicate` in the same block.
 
@@ -220,13 +220,15 @@ The guard's authority is the table's own partition columns, not `partition_by`. 
 honoured only when the table is created, so a run against a table an earlier run partitioned need not
 declare it.
 
-### `partition_by:` cannot be declared through pz today
+### `partition_by:` cannot be declared through pz 0.2.2
 
-pz reads `partition_by:` as ONE column whose value substitutes calendar tokens (`{yyyy}/{MM}/{dd}`)
-in the sink's `path:`, and refuses the option with `PZ0219` when the path carries no such tokens.
-Delta partitions declaratively by column value, with no templated path to route into, so a Delta
-table created through pz is **unpartitioned** — this option, and everything below that depends on it,
-is reachable only when the connector is driven directly. `installing.md` has the detail.
+pz 0.2.2 reads `partition_by:` as ONE column whose value substitutes calendar tokens
+(`{yyyy}/{MM}/{dd}`) in the sink's `path:`, and refuses the option with `PZ0219` when the path carries
+no such tokens. Delta partitions declaratively by column value, with no templated path to route into,
+so a Delta table created through pz 0.2.2 is **unpartitioned** — this option, and everything below
+that depends on it, is reachable only when the connector is driven directly. `installing.md` has the
+detail, and pz 0.3.0 closes it ([coccor/pz#16](https://github.com/coccor/pz/pull/16)). This connector
+requires 0.3.0, so `partition_by:` is declarable through pz.
 
 ## `schema_policy: evolve`
 
