@@ -4,22 +4,22 @@ This page is about the path a stranger takes: declare the connector by package i
 run `pz restore`, run `pz run`. `samples/delta-roundtrip/` is that project, and
 `scripts/verify-external-connector.sh` is that path exercised end to end.
 
-Read the first section before anything else. **Against pz 0.2.2 this connector does not load from a
-restored package**, for reasons that are entirely in pz's package materializer and have nothing to do
-with Delta.
+**This connector requires pz 0.3.0 or newer**, and compiles against `Pz.Connectors.Abstractions`
+0.3.0. The first section says why an older pz cannot install it — kept because a lock file an older
+pz wrote still carries the consequences, and because the failure modes are worth recognizing.
 
-## Against pz 0.2.2, a restored package cannot load
+## Why pz 0.2.2 cannot load a restored package
 
 > [!NOTE]
-> **Fixed in pz 0.3, which is not released yet.** Every defect in this section is closed by
-> [coccor/pz#16](https://github.com/coccor/pz/pull/16). Verified on linux-x64 against a pz built from
-> that PR (`0.2.3-alpha.0.9`): `scripts/verify-external-connector.sh` reports **no gaps at all** and
+> **Fixed in pz 0.3.0** ([coccor/pz#16](https://github.com/coccor/pz/pull/16)). Verified on linux-x64
+> against the released 0.3.0: `scripts/verify-external-connector.sh` reports **no gaps at all** and
 > passes under `PZ_VERIFY_STRICT=1` — pz materializes `lib/net9.0/DeltaLake.dll`, puts the
 > `linux-x64` Rust libraries on the connector's probe path byte-for-byte, and the merge, the
 > `delta_scan` read-back and the `pz retry` reuse all run with nothing staged around them.
-> `.pz/packages` measures 277 MB, which is the RID-correct pair rather than the wrong one.
+> `.pz/packages` measures 277 MB, the RID-correct pair rather than the wrong one.
 >
-> Until pz 0.3 is on nuget.org, everything below is what you get.
+> A `pz.lock.json` written by pz 0.2.2 records no archive paths and cannot be upgraded in place: pz
+> 0.3.0 reports it as `PZ0321` and `pz restore` regenerates it.
 
 `pz.lock.json` records each asset as a bare FILE NAME. `PackageMaterializer` then re-finds that name
 in the .nupkg under a prefix alone — `lib/` for managed assemblies, `runtimes/` for native ones — and
@@ -101,26 +101,26 @@ What that costs is measured in `reference/write.md` — joining on the partition
 19–39x on a merge.
 
 > [!NOTE]
-> **Fixed in pz 0.3, unreleased.** `partition_by:` names the columns an output is partitioned by — a
-> name or a list — and `path:` decides who lays them out: calendar tokens mean pz renders the layout
+> **Fixed in pz 0.3.0.** `partition_by:` names the columns an output is partitioned by — a name or a
+> list — and `path:` decides who lays them out: calendar tokens mean pz renders the layout
 > (`PathTemplating`), no tokens mean the destination records its own
 > (`ConnectorCapabilities.ColumnPartitionedWrites`, which this connector declares instead of
 > `PathTemplating`, a flag it only ever held to get past the old gate).
 >
-> Verified end to end against a pz built from
-> [coccor/pz#16](https://github.com/coccor/pz/pull/16). `samples/delta-roundtrip` declares
+> Verified end to end against the released pz 0.3.0. `samples/delta-roundtrip` declares
 > `partition_by: ['dt']` with no `path:`, and the table pz writes carries
 > `"partitionColumns":["dt"]` in `_delta_log/00000000000000000000.json` with `dt=2026-01-01`,
 > `dt=2026-01-02` and `dt=2026-01-03` directories on disk. The partition-pruned merge is reachable
 > through pz.
 
-## `projectDirectoryAnchor`: a relative `root:` becomes possible in pz 0.3
+## `projectDirectoryAnchor`: a relative `root:` is possible from pz 0.3.0
 
-The section below describes pz 0.2.2, where the project-directory anchor is injected by connector
-NAME and so can never reach a third-party connector. pz 0.3 makes it declarative: a connector opts in
-with `"projectDirectoryAnchor": true` in its `pz.connector.json` and receives `base_dir` like
-`localfiles` does. This connector does not declare it yet — the sample's `${DELTA_LAKE_ROOT}` works
-against both versions, and an absolute root is right for `s3://`-family roots regardless.
+The section below describes pz 0.2.2, where the project-directory anchor was injected by connector
+NAME and so could never reach a third-party connector. pz 0.3.0 makes it declarative: a connector
+opts in with `"projectDirectoryAnchor": true` in its `pz.connector.json` and receives `base_dir` the
+way `localfiles` does. **This connector does not declare it** — the sample's `${DELTA_LAKE_ROOT}` is
+explicit about where the lake lives, and an absolute root is right for `s3://`-family roots
+regardless. Declaring it is a live option, not a limitation.
 
 ## What the dependency costs, and how long it looks broken
 
@@ -131,9 +131,9 @@ Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0:
 | this connector's own nupkg | 52 KB |
 | `DeltaLake.Net` nupkg — every RID in one package | **222 MB**, and this is the download |
 | `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz 0.2.2 materializes it | 126 MB — and unusable, per the section above |
-| `.pz/packages` after the verify script bridges it | 263 MB — the wrong-architecture pair is still there and the right one sits beside it |
-| `.pz/packages` as pz 0.3 materializes it | **277 MB, nothing bridged** — the RID-correct pair, measured against the build from coccor/pz#16 |
+| `.pz/packages` as pz 0.3.0 materializes it | **277 MB** — the RID-correct pair, nothing bridged |
+| `.pz/packages` as pz 0.2.2 materialized it | 126 MB — and unusable, per the section above |
+| `.pz/packages` after the verify script bridged 0.2.2 | 263 MB — the wrong-architecture pair still there and the right one beside it |
 | the `linux-x64` native pair alone | 138 MB |
 
 Sizes are `du -h` (so MiB), measured, none projected. The 263 MB figure is the bridged state, not

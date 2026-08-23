@@ -7,26 +7,23 @@ Reads through DuckDB's `delta` extension, so rows never enter .NET. Writes — `
 
 ## Read this before you install it
 
-**1. Against pz 0.2.2 this connector does not load from a restored package.** pz's package
+**1. It requires pz 0.3.0 or newer.** Earlier versions cannot install it: pz 0.2.2's package
 materializer extracts the wrong target framework and the wrong RID out of a multi-targeted, multi-RID
 dependency, and never places a dependency's native assets where the connector's load context probes.
-The causes are entirely in pz. They are written up, with what each one looks like when it bites, in
-[`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md),
-and `scripts/verify-external-connector.sh` detects them and stages around them so the rest of the
-chain can still be exercised.
+Those causes were entirely in pz and are fixed in 0.3.0
+([coccor/pz#16](https://github.com/coccor/pz/pull/16));
+[`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md)
+keeps the write-up of what each one looked like when it bit, because a lock file written by an older
+pz still carries the consequences. This connector compiles against `Pz.Connectors.Abstractions`
+0.3.0, so there is no configuration in which it loads under an older host.
 
-> **All of it is fixed in pz 0.3, which is not released yet.**
-> [coccor/pz#16](https://github.com/coccor/pz/pull/16) closes these and the `partition_by` gap below.
-> Verified on linux-x64 against a pz built from that PR: the verify script reports no gaps and passes
-> under `PZ_VERIFY_STRICT=1`, and a `partition_by: ['dt']` Delta table comes out genuinely
-> partitioned. Until pz 0.3 is on nuget.org, points 1–3 are what you get.
+Verified on linux-x64 against the released pz 0.3.0:
+`scripts/verify-external-connector.sh` reports **no gaps** and passes under `PZ_VERIFY_STRICT=1`.
 
 **2. It is a 222 MB download.** `DeltaLake.Net` ships every RID's Rust libraries in one package, and
-`pz restore` prints nothing while fetching it. It is not hung — wait it out. 125 MB then lands in
-`~/.pz/cache` and 126 MB in `.pz/packages` — and that 126 MB is **the wrong RID's** Rust libraries,
-per point 1, which is why it is smaller than the 138 MB the `linux-x64` pair alone measures. Staging
-the correct pair alongside takes the directory to 263 MB. All measured on linux-x64 with a cold
-cache, none projected; `docs/installing.md` has the full table.
+`pz restore` prints nothing while fetching it. It is not hung — wait it out. 139 MB then lands in
+`~/.pz/cache` and 277 MB in `.pz/packages`, the `linux-x64` pair included. All measured on linux-x64
+with a cold cache, none projected; `docs/installing.md` has the full table.
 
 **3. Platforms.**
 
@@ -34,7 +31,7 @@ cache, none projected; `docs/installing.md` has the full table.
 |---|---|
 | `linux-x64` | **the only platform anything here has been run on** |
 | `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` | shipped by `DeltaLake.Net`, never tested here |
-| `linux-musl-x64` (Alpine) | **unsupported on pz 0.2.2** — it matches native assets by exact RID with no RID-graph fallback, so a musl host never matches `linux-x64`; pz 0.3 selects through the RID graph, making it reachable but still untested |
+| `linux-musl-x64` (Alpine) | reachable from pz 0.3.0 on, which selects native assets through the RID graph so a musl host resolves `linux-x64` — **never tested here**. Under pz 0.2.2 it could not work at all |
 | `win-arm64` | **unsupported** — `DeltaLake.Net` ships no assets for it |
 
 Shipped is not tested. CI runs ubuntu only, and deliberately: the object-store suites cannot pull

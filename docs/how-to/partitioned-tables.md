@@ -12,16 +12,16 @@ cost, and because a table another engine partitioned still reads and writes corr
 *declaration* is out of reach.
 
 > [!NOTE]
-> **Fixed in pz 0.3, which is not released yet.**
+> **Fixed in pz 0.3.0**, which this connector requires.
 > [coccor/pz#16](https://github.com/coccor/pz/pull/16) gives `partition_by:` one meaning — the columns
 > an output is partitioned by, a name or a list — and lets `path:` decide who lays them out. No
 > calendar tokens means the destination records its own partitioning, which is what a Delta table
 > does; this connector declares `ConnectorCapabilities.ColumnPartitionedWrites` to say so. Verified
-> against a pz built from that PR: `samples/delta-roundtrip` declares `partition_by: ['dt']` and the
-> table pz writes carries `"partitionColumns":["dt"]` in its transaction log.
+> against the released 0.3.0: `samples/delta-roundtrip` declares `partition_by: ['dt']` and the table
+> pz writes carries `"partitionColumns":["dt"]` in its transaction log.
 >
-> Everything below is reachable through pz from 0.3 on, and by driving the connector directly before
-> that.
+> **Everything below is reachable through pz.** The paragraph above it describes pz 0.2.2, which
+> cannot load this connector at all.
 
 
 ## What partitioning does

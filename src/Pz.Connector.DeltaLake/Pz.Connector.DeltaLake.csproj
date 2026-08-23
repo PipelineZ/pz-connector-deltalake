@@ -7,7 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.2.3-alpha.0.9" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.3.0" />
     <PackageReference Include="DeltaLake.Net" Version="0.33.0" />
     <PackageReference Include="Apache.Arrow" Version="23.0.0" />
   </ItemGroup>
