@@ -22,7 +22,7 @@ public class ConnectorIdentityTests
             ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow |
             ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.Merge |
             ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
-            ConnectorCapabilities.PathTemplating;
+            ConnectorCapabilities.ColumnPartitionedWrites;
         Assert.Equal(expected, new DeltaLakeConnector().Capabilities);
     }
 
@@ -37,6 +37,13 @@ public class ConnectorIdentityTests
     [InlineData(ConnectorCapabilities.StablePartitionIds)]
     [InlineData(ConnectorCapabilities.TextLengthStats)]
     [InlineData(ConnectorCapabilities.SyncState)]
+    // PathTemplating means the connector renders pz's calendar tokens into a path. It was declared
+    // once, for a meaning it does not have: it was the only flag that got partition_by past pz, which
+    // read the option as one column substituting those tokens. pz now splits the two -- tokens mean
+    // pz lays the partitions out, their absence means the destination does -- so the honest flag is
+    // ColumnPartitionedWrites and this one goes back to being withheld. Nothing here renders a path
+    // in either direction.
+    [InlineData(ConnectorCapabilities.PathTemplating)]
     public void Capabilities_deliberately_withheld_stay_withheld(ConnectorCapabilities withheld)
     {
         // Each of these makes pz refuse a config with a targeted error rather than degrade silently.

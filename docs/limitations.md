@@ -38,19 +38,27 @@ option that turns any of the three optional features on. Reading a table that al
 untested in either direction: reads go through DuckDB's `delta` extension, and what it supports is
 DuckDB's business, not something measured here.
 
-### `partition_by:` cannot be declared through pz
+### `partition_by:` cannot be declared through pz 0.2.2 — fixed in pz 0.3
 
-pz reads `partition_by:` as ONE column whose value substitutes calendar tokens in the sink's `path:`,
-and refuses it with **PZ0219** when the path carries none. Delta partitions declaratively by column
-value, with no templated path to route into, so **a Delta table written through pz is unpartitioned**
-— and a merge against it scans the whole table rather than the partitions the write touches. That is
-worth 19–39× on a merge, measured, and it is the largest single gap between this connector driven
-directly and this connector driven by pz.
+pz 0.2.2 reads `partition_by:` as ONE column whose value substitutes calendar tokens in the sink's
+`path:`, and refuses it with **PZ0219** when the path carries none. Delta partitions declaratively by
+column value, with no templated path to route into, so **a Delta table written through pz 0.2.2 is
+unpartitioned** — and a merge against it scans the whole table rather than the partitions the write
+touches. That is worth 19–39× on a merge, measured, and it was the largest single gap between this
+connector driven directly and this connector driven by pz.
+
+[coccor/pz#16](https://github.com/coccor/pz/pull/16) closes it: `partition_by:` names the columns an
+output is partitioned by, and `path:` decides who lays them out — calendar tokens mean pz renders the
+layout, their absence means the destination records its own
+(`ConnectorCapabilities.ColumnPartitionedWrites`). Verified against a pz built from that PR: the
+sample declares `partition_by: ['dt']` and the table pz writes carries `"partitionColumns":["dt"]` in
+its transaction log, with `dt=` directories on disk. **Until pz 0.3 ships, the paragraph above is
+what you get.**
 
 No test in this repository writes a Delta table through pz with a calendar-templated `path:`; that
 combination is neither covered nor meaningful for a store that partitions by column value.
 
-### The external-connector path does not work against pz 0.2.2
+### The external-connector path does not work against pz 0.2.2 — fixed in pz 0.3
 
 A restored package does not load: pz's materializer extracts the wrong target framework and the wrong
 RID out of a multi-targeted, multi-RID dependency, and never places a dependency's native assets where
@@ -58,12 +66,20 @@ the connector's load context probes. The causes are entirely in pz.
 [installing.md](installing.md) has each one, what it looks like when it bites, and the script that
 detects and stages around them.
 
+[coccor/pz#16](https://github.com/coccor/pz/pull/16) closes all of them — `pz.lock.json` records each
+asset's archive path, native assets select through a RID graph, and a transitive package's `native/`
+reaches the probe path. Against a pz built from that PR,
+`scripts/verify-external-connector.sh` reports **no gaps** and passes under `PZ_VERIFY_STRICT=1`,
+the mode that exists to go green exactly when this is fixed.
+
 ### Platform coverage
 
 `DeltaLake.Net` ships `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64` — that is what
 it SHIPS. **linux-x64 is the only platform anything here has been run on.** `linux-musl-x64` (Alpine)
-does not work at all, because pz selects native assets by exact RID match with no RID-graph fallback;
-`win-arm64` is not shipped by `DeltaLake.Net` at all.
+does not work against pz 0.2.2, because it selects native assets by exact RID match with no RID-graph
+fallback; pz 0.3 selects through the RID graph, so a musl host reaches `linux-x64` — untested here
+like every other non-linux-x64 platform, but no longer refused by construction. `win-arm64` is not
+shipped by `DeltaLake.Net` at all.
 
 ### Memory: `replace` and `merge` buffer the whole write
 
@@ -74,8 +90,14 @@ larger than available memory is not something this connector can stage around.
 ### `append` is at-least-once
 
 A crash between a successful commit and pz recording it duplicates rows on `pz retry`. Closing that
-window needs a stable attempt identity, and pz's `OutputSpec` carries none — see
+window needs a stable attempt identity, and pz 0.2.2's `OutputSpec` carries none — see
 [concepts/delivery-guarantees.md](concepts/delivery-guarantees.md).
+
+pz 0.3 adds `OutputSpec.Attempt` (`Node`, `Run`, `Ordinal`), which is exactly the identity that was
+missing: a Delta commit can carry it as a commit property and the next attempt can read it back and
+skip what already landed. **This connector has not implemented that yet** — the ABI now allows it,
+which is a different statement from the window being closed. Note the promise is within-run only, so
+it closes the `pz retry` case above and not a second `pz run`.
 
 ### Merges cannot see duplicates that are already in the table
 

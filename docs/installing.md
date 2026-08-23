@@ -10,6 +10,17 @@ with Delta.
 
 ## Against pz 0.2.2, a restored package cannot load
 
+> [!NOTE]
+> **Fixed in pz 0.3, which is not released yet.** Every defect in this section is closed by
+> [coccor/pz#16](https://github.com/coccor/pz/pull/16). Verified on linux-x64 against a pz built from
+> that PR (`0.2.3-alpha.0.9`): `scripts/verify-external-connector.sh` reports **no gaps at all** and
+> passes under `PZ_VERIFY_STRICT=1` — pz materializes `lib/net9.0/DeltaLake.dll`, puts the
+> `linux-x64` Rust libraries on the connector's probe path byte-for-byte, and the merge, the
+> `delta_scan` read-back and the `pz retry` reuse all run with nothing staged around them.
+> `.pz/packages` measures 277 MB, which is the RID-correct pair rather than the wrong one.
+>
+> Until pz 0.3 is on nuget.org, everything below is what you get.
+
 `pz.lock.json` records each asset as a bare FILE NAME. `PackageMaterializer` then re-finds that name
 in the .nupkg under a prefix alone — `lib/` for managed assemblies, `runtimes/` for native ones — and
 extracts whichever archive entry matches first. The target framework and the RID that pz's resolver
@@ -77,16 +88,39 @@ lake:
   root: ${DELTA_LAKE_ROOT}
 ```
 
-## `partition_by:` cannot be declared through pz
+## `partition_by:` cannot be declared through pz 0.2.2
 
-pz reads `partition_by:` as ONE column whose value substitutes calendar tokens (`{yyyy}/{MM}/{dd}`)
-in the sink's `path:`, and rejects the option with `PZ0219` whenever the path carries no such tokens.
-Delta partitions declaratively by column value and has no templated path to route into, so the two
-meanings never meet: **a Delta table written through pz today is unpartitioned.** The connector's
-partitioning and its partition-pruned merge are reachable only when it is driven directly.
+pz 0.2.2 reads `partition_by:` as ONE column whose value substitutes calendar tokens
+(`{yyyy}/{MM}/{dd}`) in the sink's `path:`, and rejects the option with `PZ0219` whenever the path
+carries no such tokens. Delta partitions declaratively by column value and has no templated path to
+route into, so the two meanings never meet: **a Delta table written through pz 0.2.2 is
+unpartitioned.** The connector's partitioning and its partition-pruned merge are reachable only when
+it is driven directly.
 
 What that costs is measured in `reference/write.md` — joining on the partition column is worth
-19–39x on a merge, and that is the number currently out of reach through pz.
+19–39x on a merge.
+
+> [!NOTE]
+> **Fixed in pz 0.3, unreleased.** `partition_by:` names the columns an output is partitioned by — a
+> name or a list — and `path:` decides who lays them out: calendar tokens mean pz renders the layout
+> (`PathTemplating`), no tokens mean the destination records its own
+> (`ConnectorCapabilities.ColumnPartitionedWrites`, which this connector declares instead of
+> `PathTemplating`, a flag it only ever held to get past the old gate).
+>
+> Verified end to end against a pz built from
+> [coccor/pz#16](https://github.com/coccor/pz/pull/16). `samples/delta-roundtrip` declares
+> `partition_by: ['dt']` with no `path:`, and the table pz writes carries
+> `"partitionColumns":["dt"]` in `_delta_log/00000000000000000000.json` with `dt=2026-01-01`,
+> `dt=2026-01-02` and `dt=2026-01-03` directories on disk. The partition-pruned merge is reachable
+> through pz.
+
+## `projectDirectoryAnchor`: a relative `root:` becomes possible in pz 0.3
+
+The section below describes pz 0.2.2, where the project-directory anchor is injected by connector
+NAME and so can never reach a third-party connector. pz 0.3 makes it declarative: a connector opts in
+with `"projectDirectoryAnchor": true` in its `pz.connector.json` and receives `base_dir` like
+`localfiles` does. This connector does not declare it yet — the sample's `${DELTA_LAKE_ROOT}` works
+against both versions, and an absolute root is right for `s3://`-family roots regardless.
 
 ## What the dependency costs, and how long it looks broken
 
@@ -97,8 +131,9 @@ Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0:
 | this connector's own nupkg | 52 KB |
 | `DeltaLake.Net` nupkg — every RID in one package | **222 MB**, and this is the download |
 | `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz materializes it today | 126 MB — and unusable, per the section above |
+| `.pz/packages` as pz 0.2.2 materializes it | 126 MB — and unusable, per the section above |
 | `.pz/packages` after the verify script bridges it | 263 MB — the wrong-architecture pair is still there and the right one sits beside it |
+| `.pz/packages` as pz 0.3 materializes it | **277 MB, nothing bridged** — the RID-correct pair, measured against the build from coccor/pz#16 |
 | the `linux-x64` native pair alone | 138 MB |
 
 Sizes are `du -h` (so MiB), measured, none projected. The 263 MB figure is the bridged state, not

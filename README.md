@@ -15,6 +15,12 @@ The causes are entirely in pz. They are written up, with what each one looks lik
 and `scripts/verify-external-connector.sh` detects them and stages around them so the rest of the
 chain can still be exercised.
 
+> **All of it is fixed in pz 0.3, which is not released yet.**
+> [coccor/pz#16](https://github.com/coccor/pz/pull/16) closes these and the `partition_by` gap below.
+> Verified on linux-x64 against a pz built from that PR: the verify script reports no gaps and passes
+> under `PZ_VERIFY_STRICT=1`, and a `partition_by: ['dt']` Delta table comes out genuinely
+> partitioned. Until pz 0.3 is on nuget.org, points 1–3 are what you get.
+
 **2. It is a 222 MB download.** `DeltaLake.Net` ships every RID's Rust libraries in one package, and
 `pz restore` prints nothing while fetching it. It is not hung — wait it out. 125 MB then lands in
 `~/.pz/cache` and 126 MB in `.pz/packages` — and that 126 MB is **the wrong RID's** Rust libraries,
@@ -28,7 +34,7 @@ cache, none projected; `docs/installing.md` has the full table.
 |---|---|
 | `linux-x64` | **the only platform anything here has been run on** |
 | `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` | shipped by `DeltaLake.Net`, never tested here |
-| `linux-musl-x64` (Alpine) | **unsupported** — pz matches native assets by exact RID and has no RID-graph fallback, so a musl host never matches `linux-x64` |
+| `linux-musl-x64` (Alpine) | **unsupported on pz 0.2.2** — it matches native assets by exact RID with no RID-graph fallback, so a musl host never matches `linux-x64`; pz 0.3 selects through the RID graph, making it reachable but still untested |
 | `win-arm64` | **unsupported** — `DeltaLake.Net` ships no assets for it |
 
 Shipped is not tested. CI runs ubuntu only, and deliberately: the object-store suites cannot pull
