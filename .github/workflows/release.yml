@@ -27,10 +27,10 @@ jobs:
       contents: read
       id-token: write # required for NuGet/login's OIDC exchange.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # MinVer computes the release version from this tag plus history.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
       - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
