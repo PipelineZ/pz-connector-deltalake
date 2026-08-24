@@ -95,15 +95,14 @@ order by dt
 
 ```bash
 export DELTA_LAKE_ROOT="$PWD/out/lake"
-pz restore --feeds <your-local-folder-feed> --feeds https://api.nuget.org/v3/index.json
+pz restore
 pz run orders_delta      # data/orders.csv -> a Delta table under $DELTA_LAKE_ROOT
 pz run orders_report     # that Delta table -> out/report/orders_report/*.csv
 ```
 
-`--feeds` is there because `0.1.0` is this connector's first tagged release: until that tag exists
-there is nothing on nuget.org under this id, so point the first feed at a folder holding a package
-you packed yourself and pin that version. `scripts/verify-external-connector.sh` does all of it for
-you. Once the release is out, a bare `pz restore` is enough.
+`Pz.Connector.DeltaLake` is on nuget.org, so a bare `pz restore` resolves it from there. Pointing
+`--feeds` at a local folder is only needed when testing a package you packed yourself, before it is
+released — `scripts/verify-external-connector.sh` does exactly that.
 
 Two runs, not one: the lake is a store, not a DAG edge. pz derives edges from `ref()`, `source()` and
 `sink()` calls, and nothing connects the pipeline that writes `lake.orders` to the one that reads it,

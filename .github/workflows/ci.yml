@@ -45,11 +45,9 @@ jobs:
   # above never touches pz's resolver, package materializer, or connector load context, and this
   # connector is the first thing to carry a native package through any of them.
   #
-  # This job is EXPECTED to report upstream gaps and still pass: against pz 0.2.2 the materialized
-  # package is not loadable, the script says so loudly, stages the correct assets, and verifies
-  # everything downstream. Setting PZ_VERIFY_STRICT=1 makes those gaps fail the job instead -- flip
-  # it, and delete the script's bridging block, the day pz materializes a connector package
-  # correctly. Until then a green tick here does NOT mean the install path works; read the log.
+  # Against the released pz (0.3.0+, which this connector requires) the script reports no gaps and
+  # would pass under PZ_VERIFY_STRICT=1 too -- it isn't set here so the job still passes if pz ever
+  # regresses on this path, with the gap logged rather than failing the build outright.
   verify-external-connector:
     runs-on: ubuntu-latest
     timeout-minutes: 40 # the DeltaLake.Net download alone is 222 MB on a cold cache.
