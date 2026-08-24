@@ -87,11 +87,11 @@ host — is exercised by `scripts/verify-external-connector.sh`, and it is cover
 | | status |
 |---|---|
 | `pz restore` resolves and downloads the package | yes |
-| the materialized package is loadable | **no** — pz 0.2.2 materializes the wrong TFM and the wrong RID, and never puts a dependency's native assets on the ALC's probe path (`installing.md`) |
-| the connector ALC loads it, natives and all, once the correct assets are staged | yes, linux-x64 |
+| the materialized package is loadable | yes, linux-x64 (`installing.md`) |
+| the connector ALC loads it, natives and all | yes, linux-x64 |
 | `merge` write + `delta_scan` read-back through a real `pz run` | yes, linux-x64, local filesystem |
 | `pz retry` reloads the connector and reuses the staged Delta extraction | yes, linux-x64 |
-| `partition_by` | **declarable through pz** via `ColumnPartitionedWrites` (`reference/write.md`); unreachable under pz 0.2.2 (`PZ0219`), which cannot load this connector anyway |
+| `partition_by` | **declarable through pz** via `ColumnPartitionedWrites` (`reference/write.md`) |
 | any platform other than linux-x64 | **not tested** |
 
 **linux-x64 is the only platform anything here has been run on.** `DeltaLake.Net` ships `linux-x64`,
@@ -112,6 +112,6 @@ does not mean every guard on the path ran.
 | `DeltaLake.Net` | 0.33.0 |
 | delta-rs, as its own commits report it | `delta-rs:0.32.1` — the `engineInfo` field every commit this connector writes carries. The .NET package's version and the Rust crate's are NOT the same number; where a statement anywhere in these pages is about the WRITER, this is the version it was measured against. |
 | DuckDB | 1.5.5 (`DuckDB.NET.Data.Full`) |
-| connector ABI | `Pz.Connectors.Abstractions` 0.2.2 |
-| pz (the host, end-to-end run) | 0.2.2 |
+| connector ABI | `Pz.Connectors.Abstractions` 0.3.0 |
+| pz (the host, end-to-end run) | 0.3.0 |
 | measured on | 2026-08-22 |

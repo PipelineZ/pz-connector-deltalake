@@ -96,8 +96,7 @@ the only thing standing between a typo and a silently ignored setting. Note the 
 - **`partition_by:`** takes a column name or a list, and the two spellings mean the same thing. What
   is refused is a declaration that cannot name columns: an empty list, a repeated column, or an entry
   that is not a name. Each would otherwise create a layout nobody asked for, and Delta cannot
-  repartition a table in place. (A bare `partition_by: dt` used to be refused too, back when this
-  connector parsed the option itself and read a non-list as "no partitioning".)
+  repartition a table in place.
 - **`max_rows_per_group`** is deliberately not an option: it was measured to have no effect on the
   output, and a validated no-op that reads like a working setting is worse than an honest error.
 - **An unrecognised `strategy:`** is refused before the table is opened, so a typo leaves nothing
@@ -384,23 +383,6 @@ delta extension reads through delta-kernel-rs, whose object store recognizes an 
 string and resolves the well-known emulator port for it. Run Azurite on port 10000, or read through
 delta-rs instead.
 
-### The connector does not load at all
-
-**Symptom.** `pz run` fails with `MissingMethodException: Void
-DeltaLake.Table.TableStorageOptions.set_TableLocation(System.String)` on the first write, or with a
-`DllNotFoundException`, on a project that restored cleanly.
-
-**Cause: pz 0.2.2's package materializer**, not this connector. `pz.lock.json` records each asset as a
-bare FILE NAME, so the materializer re-finds that name in the .nupkg under a prefix alone and extracts
-whichever archive entry matches first. On a package that multi-targets or ships several RIDs, the
-wrong file wins — silently. And a dependency package's own `native/` directory is never put on the
-load context's probe path.
-
-**Fix.** There is no configuration that works around it from this side.
-[installing.md](installing.md) has the three measured consequences, what each looks like when it
-bites, and `scripts/verify-external-connector.sh`, which detects them and stages the correct assets so
-the rest of the chain can be tested.
-
 ### `pz restore` prints nothing for a minute
 
 **It is not hung.** `DeltaLake.Net` ships every RID's Rust libraries in one package: a 222 MB download
@@ -417,8 +399,7 @@ Measured on linux-x64 with a cold cache:
 | | |
 |---|---|
 | `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz materializes it today | 126 MB — and unusable, being the wrong RID's pair (see "The connector does not load at all") |
-| `.pz/packages` once the verify script stages the correct pair beside it | 263 MB |
+| `.pz/packages` as pz materializes it | 277 MB — the RID-correct pair |
 | the `linux-x64` native pair alone | 138 MB |
 
 On top of that, a Delta table only grows: a `remove` action does not delete a file, so every merge and
@@ -427,12 +408,11 @@ because pz has no verb that maps to table maintenance — see [limitations.md](l
 
 ### The platform is not supported
 
-`DeltaLake.Net` ships `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64`. Two gaps are
+`DeltaLake.Net` ships `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64`. Two things are
 worth knowing before they cost you an afternoon:
 
-- **`linux-musl-x64` (Alpine) does not work.** pz selects native assets by exact RID match and has no
-  RID-graph fallback, so a musl host will not match `linux-x64` even though NuGet's RID graph would
-  consider them compatible.
+- **`linux-musl-x64` (Alpine) is reachable but untested.** pz selects native assets through a RID
+  graph, so a musl host resolves `linux-x64` — but nothing here has been run on it.
 - **`win-arm64` is not shipped at all** by `DeltaLake.Net`, so there is nothing to match.
 
 And **linux-x64 is the only platform anything here has been run on.** What the package ships is not

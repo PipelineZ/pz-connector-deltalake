@@ -35,9 +35,8 @@ rather than staying silent: a row's partition value can change while its key doe
 derived anyway would hide that row's *current* partition from the target scan, the merge would see
 NOT MATCHED, and it would insert a second copy. A silent duplicate is worse than a slow merge.
 
-**Through pz this step is currently unreachable** — `partition_by:` cannot be declared (PZ0219). See
-[partitioned-tables.md](partitioned-tables.md). It is the largest single gap between this connector
-driven directly and this connector driven by pz.
+Declare it with `partition_by:`, driven directly or through pz — see
+[partitioned-tables.md](partitioned-tables.md).
 
 ## 2. Filter the source in the pipeline SQL
 

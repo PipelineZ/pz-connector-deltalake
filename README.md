@@ -7,16 +7,7 @@ Reads through DuckDB's `delta` extension, so rows never enter .NET. Writes — `
 
 ## Read this before you install it
 
-**1. It requires pz 0.3.0 or newer.** Earlier versions cannot install it: pz 0.2.2's package
-materializer extracts the wrong target framework and the wrong RID out of a multi-targeted, multi-RID
-dependency, and never places a dependency's native assets where the connector's load context probes.
-Those causes were entirely in pz and are fixed in 0.3.0
-([coccor/pz#16](https://github.com/coccor/pz/pull/16));
-[`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md)
-keeps the write-up of what each one looked like when it bit, because a lock file written by an older
-pz still carries the consequences. This connector compiles against `Pz.Connectors.Abstractions`
-0.3.0, so there is no configuration in which it loads under an older host.
-
+**1. It requires pz 0.3.0 or newer**, and compiles against `Pz.Connectors.Abstractions` 0.3.0.
 Verified on linux-x64 against the released pz 0.3.0:
 `scripts/verify-external-connector.sh` reports **no gaps** and passes under `PZ_VERIFY_STRICT=1`.
 
@@ -31,7 +22,7 @@ with a cold cache, none projected; `docs/installing.md` has the full table.
 |---|---|
 | `linux-x64` | **the only platform anything here has been run on** |
 | `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` | shipped by `DeltaLake.Net`, never tested here |
-| `linux-musl-x64` (Alpine) | reachable from pz 0.3.0 on, which selects native assets through the RID graph so a musl host resolves `linux-x64` — **never tested here**. Under pz 0.2.2 it could not work at all |
+| `linux-musl-x64` (Alpine) | reachable — pz selects native assets through the RID graph so a musl host resolves `linux-x64` — **never tested here** |
 | `win-arm64` | **unsupported** — `DeltaLake.Net` ships no assets for it |
 
 Shipped is not tested. CI runs ubuntu only, and deliberately: the object-store suites cannot pull
@@ -132,10 +123,9 @@ filesystem, 200 partitions, 1,000 source rows scattered across 5 of them):
 | 2 000 000 | 6 446 ms | 253 ms |
 | 8 000 000 | 23 793 ms | 604 ms |
 
-19–39×, widening with table size. The lever is partitioning the table and putting the partition
-column in `keys:` — and **that is currently unreachable through pz**, which reads `partition_by:` as a
-calendar-token path template and refuses it (PZ0219) for a store that partitions by column value. A
-Delta table written through pz today is unpartitioned.
+19–39×, widening with table size. The lever is partitioning the table (`partition_by:`) and putting
+the partition column in `keys:`. See
+[`docs/how-to/partitioned-tables.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/partitioned-tables.md).
 
 `merge_predicate:` is the other lever, and it is sharp: **a row it excludes is duplicated, not
 skipped.** Read

@@ -63,9 +63,8 @@ lake:
         merge_predicate: "target.dt >= '2026-01-01'"
 ```
 
-That example omits `partition_by:` only for brevity — pz 0.2.2 refused it here (PZ0219), for the reason in
-"`partition_by:` cannot be declared through pz today" below. Driven directly, it would sit beside
-`merge_predicate` in the same block.
+That example omits `partition_by:` only for brevity — it would sit beside `merge_predicate` in the
+same block. See [how-to/partitioned-tables.md](../how-to/partitioned-tables.md).
 
 `merge_predicate` narrows the merge further. It may only compare column names against literals: every
 name must be qualified `target.` (a column of the table being written into) or `source.` (a column of
@@ -220,16 +219,6 @@ The guard's authority is the table's own partition columns, not `partition_by`. 
 honoured only when the table is created, so a run against a table an earlier run partitioned need not
 declare it.
 
-### `partition_by:` cannot be declared through pz 0.2.2
-
-pz 0.2.2 reads `partition_by:` as ONE column whose value substitutes calendar tokens
-(`{yyyy}/{MM}/{dd}`) in the sink's `path:`, and refuses the option with `PZ0219` when the path carries
-no such tokens. Delta partitions declaratively by column value, with no templated path to route into,
-so a Delta table created through pz 0.2.2 is **unpartitioned** — this option, and everything below
-that depends on it, is reachable only when the connector is driven directly. `installing.md` has the
-detail, and pz 0.3.0 closes it ([coccor/pz#16](https://github.com/coccor/pz/pull/16)). This connector
-requires 0.3.0, so `partition_by:` is declarable through pz.
-
 ## `schema_policy: evolve`
 
 `evolve` means the same thing on every strategy — `append`, `replace` and `merge` alike: a column the
@@ -268,8 +257,7 @@ costs a table nobody can read.
 
 Merge cost follows the partitions the write touches, not the size of the table — *provided the
 partition columns are part of the join*, which is what happens whenever `partition_by` is a subset of
-`keys`. Through pz that condition cannot be met at all, because `partition_by` cannot be declared
-(above); these figures describe the connector driven directly.
+`keys`. These figures apply whether the connector is driven directly or through pz.
 
 Measured with `MergeCostBench` (DeltaLake.Net 0.33.0, local filesystem, 200 partitions,
 1 000 source rows scattered across 5 of them, ids arranged so file statistics cannot prune on their
