@@ -35,7 +35,14 @@ internal sealed record DeltaWriteOptions(
         CheckNames(spec, problems);
         CheckStrategy(spec, problems);
 
-        var partitionBy = StringList(spec, "partition_by", problems);
+        if (!PartitionColumns.TryRead(spec.Options, out var partitionBy, out var partitionProblem))
+        {
+            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
+                $"write option '{PartitionColumns.OptionName}' is invalid — {partitionProblem}",
+                $"name one column, or a list of them — {PartitionColumns.OptionName}: dt, or " +
+                $"{PartitionColumns.OptionName}: [dt, region]"));
+        }
+
         var mergePredicate = Text(spec, "merge_predicate", problems);
         var targetFileBytes = PositiveInt64(spec, "target_file_bytes", problems);
 
@@ -62,8 +69,7 @@ internal sealed record DeltaWriteOptions(
     /// gated on "append", so nothing drained — before PZDL0108 was raised over a table the run had
     /// just brought into existence and a whole write held in memory. That contradicts the rule this
     /// file states elsewhere: a configuration error must not open, create or touch a table. Unreachable
-    /// through pz, which validates strategy itself; reachable driven directly, which is the documented
-    /// way to get partitioning.</summary>
+    /// through pz, which validates strategy itself; reachable driven directly.</summary>
     private static void CheckStrategy(OutputSpec spec, List<Problem> problems)
     {
         if (Strategies.Contains(spec.Mode, StringComparer.Ordinal))
@@ -149,37 +155,6 @@ internal sealed record DeltaWriteOptions(
         }
 
         return d[a.Length, b.Length];
-    }
-
-    /// <summary>A list-valued option. A bare string is refused rather than read as an empty list: a
-    /// <c>partition_by: dt</c> that quietly produced an unpartitioned table would be a silent, and
-    /// permanent, layout change.</summary>
-    private static IReadOnlyList<string> StringList(OutputSpec spec, string key, List<Problem> problems)
-    {
-        if (!spec.Options.TryGetValue(key, out var value) || value is null)
-        {
-            return [];
-        }
-
-        if (value is string or not System.Collections.IEnumerable)
-        {
-            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
-                $"write option '{key}' must be a list of column names (got the single value '{value}')",
-                $"write it as a list — {key}: [{value}]"));
-            return [];
-        }
-
-        var items = ((System.Collections.IEnumerable)value).Cast<object?>()
-            .Select(x => x?.ToString() ?? string.Empty).ToList();
-        if (items.Any(string.IsNullOrWhiteSpace))
-        {
-            problems.Add(new Problem(DeltaErrors.InvalidWriteOption,
-                $"write option '{key}' contains an empty column name",
-                $"remove the empty entry from {key}"));
-            return [];
-        }
-
-        return items;
     }
 
     private static string? Text(OutputSpec spec, string key, List<Problem> problems)

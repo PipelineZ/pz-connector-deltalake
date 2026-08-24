@@ -6,9 +6,12 @@
 -- ConnectorCapabilities.ColumnPartitionedWrites declares, and it is why this connector no longer
 -- claims PathTemplating -- it renders no paths in either direction.
 --
+-- One column is spelled as a name; several would be a list (`partition_by: ['region', 'dt']`). Both
+-- read through the ABI's PartitionColumns, so this says exactly what pz's own compiler read.
+--
 -- `dt` is a subset of `keys`, which is the only shape in which a merge may derive a partition
 -- predicate from the incoming rows: a row's partition value cannot change without its key changing,
 -- so the derived predicate cannot hide that row's current partition from the target scan.
-INSERT INTO {{ sink('lake', 'orders', strategy: 'merge', keys: ['id', 'dt'], partition_by: ['dt']) }}
+INSERT INTO {{ sink('lake', 'orders', strategy: 'merge', keys: ['id', 'dt'], partition_by: 'dt') }}
 select id, dt, placed_at, amount
 from {{ source('seed', 'orders') }}

@@ -87,14 +87,17 @@ run under `fail_on_change` will then be refused for a column it does not produce
 ### `PZDL0108`: a write option this connector cannot act on
 
 **Symptom.** "unknown write option 'x'; did you mean 'y'?", "'mode' is not a write option", "write
-option 'partition_by' must be a list of column names", or "unsupported write strategy".
+option 'partition_by' is invalid — ...", or "unsupported write strategy".
 
 **Cause.** pz schema-validates *source* options offline but not sink output options, so this check is
 the only thing standing between a typo and a silently ignored setting. Note the specific cases:
 
 - **`mode:`** is pz's retired spelling. Use `strategy:`.
-- **`partition_by: dt`** (a bare string) is refused rather than read as "no partitioning" — a quietly
-  unpartitioned table is a permanent layout mistake.
+- **`partition_by:`** takes a column name or a list, and the two spellings mean the same thing. What
+  is refused is a declaration that cannot name columns: an empty list, a repeated column, or an entry
+  that is not a name. Each would otherwise create a layout nobody asked for, and Delta cannot
+  repartition a table in place. (A bare `partition_by: dt` used to be refused too, back when this
+  connector parsed the option itself and read a non-list as "no partitioning".)
 - **`max_rows_per_group`** is deliberately not an option: it was measured to have no effect on the
   output, and a validated no-op that reads like a working setting is worse than an honest error.
 - **An unrecognised `strategy:`** is refused before the table is opened, so a typo leaves nothing
