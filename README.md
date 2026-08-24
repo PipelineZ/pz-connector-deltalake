@@ -207,4 +207,4 @@ around them — that is the mode that goes green the day pz fixes them.
 
 ## Licence
 
-MIT (`PackageLicenseExpression` on the package; there is no `LICENSE` file in the repository yet).
+MIT — see [`LICENSE`](LICENSE).
