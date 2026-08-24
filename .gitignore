@@ -3,3 +3,4 @@ obj/
 *.user
 .pz/
 artifacts/
+.claude/
