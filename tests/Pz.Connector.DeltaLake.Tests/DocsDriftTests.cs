@@ -135,7 +135,7 @@ public class DocsDriftTests
     [Fact]
     public void Every_link_into_this_repository_resolves_to_a_file_that_exists()
     {
-        const string blobPrefix = "https://github.com/coccor/pz-connector-deltalake/blob/main/";
+        const string blobPrefix = "https://github.com/PipelineZ/pz-connector-deltalake/blob/main/";
         var root = RepoRoot();
         var problems = new List<string>();
 
