@@ -4,3 +4,5 @@ obj/
 .pz/
 artifacts/
 .claude/
+# Superpowers planning scratch (plans/specs) -- local only, never committed
+docs/superpowers/
