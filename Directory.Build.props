@@ -18,8 +18,8 @@
   <PropertyGroup Condition="'$(IsPackable)' != 'false'">
     <Authors>PipelineZ contributors</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/coccor/pz-connector-deltalake</RepositoryUrl>
-    <PackageProjectUrl>https://github.com/coccor/pz-connector-deltalake</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/PipelineZ/pz-connector-deltalake</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/PipelineZ/pz-connector-deltalake</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

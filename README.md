@@ -124,57 +124,57 @@ filesystem, 200 partitions, 1,000 source rows scattered across 5 of them):
 
 19–39×, widening with table size. The lever is partitioning the table (`partition_by:`) and putting
 the partition column in `keys:`. See
-[`docs/how-to/partitioned-tables.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/partitioned-tables.md).
+[`docs/how-to/partitioned-tables.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/partitioned-tables.md).
 
 `merge_predicate:` is the other lever, and it is sharp: **a row it excludes is duplicated, not
 skipped.** Read
-[`docs/how-to/tune-a-slow-merge.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/tune-a-slow-merge.md)
+[`docs/how-to/tune-a-slow-merge.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/tune-a-slow-merge.md)
 before reaching for it.
 
 ## Documentation
 
 **Start here if Delta Lake is new to you.**
-[`docs/delta-lake-primer.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/delta-lake-primer.md)
+[`docs/delta-lake-primer.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/delta-lake-primer.md)
 — Delta is a protocol, not a file format, and nearly every surprising thing about this connector
 traces to protocol behaviour. The transaction log, versions and time travel, why `remove` does not
 delete, partitioning, statistics, protocol versions, and concurrency — with real log excerpts.
 
 **Concepts**
 
-- [`docs/concepts/architecture.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/concepts/architecture.md)
+- [`docs/concepts/architecture.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/concepts/architecture.md)
   — two engines, one connection, and the Rust library in your process
-- [`docs/concepts/delivery-guarantees.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/concepts/delivery-guarantees.md)
+- [`docs/concepts/delivery-guarantees.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/concepts/delivery-guarantees.md)
   — how Delta maps onto pz's matrix, and exactly which crash window duplicates
 
 **Reference**
 
-- [`docs/reference/connection.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/reference/connection.md)
+- [`docs/reference/connection.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/reference/connection.md)
   — `root:`, credentials, and how each engine gets them
-- [`docs/reference/read.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/reference/read.md)
+- [`docs/reference/read.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/reference/read.md)
   — `path`, `version`, `union_by_name`, and what is pushed down
-- [`docs/reference/write.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/reference/write.md)
+- [`docs/reference/write.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/reference/write.md)
   — strategies, `keys`, `merge_predicate`, `schema_policy`, partition values, and what a merge costs
 
 **How to**
 
-- [incremental ingest with a watermark](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/incremental-ingest.md)
-- [upsert with `keys`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/upsert-with-keys.md)
-- [partitioned tables](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/partitioned-tables.md)
-- [tuning a slow merge](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/tune-a-slow-merge.md)
-- [S3 credentials and multi-writer safety](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/s3-credentials.md)
-- [Azure and ADLS credentials](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/azure-credentials.md)
-- [reading a table another engine writes](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/read-a-table-another-engine-writes.md)
-- [time travel](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/how-to/time-travel.md)
+- [incremental ingest with a watermark](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/incremental-ingest.md)
+- [upsert with `keys`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/upsert-with-keys.md)
+- [partitioned tables](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/partitioned-tables.md)
+- [tuning a slow merge](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/tune-a-slow-merge.md)
+- [S3 credentials and multi-writer safety](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/s3-credentials.md)
+- [Azure and ADLS credentials](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/azure-credentials.md)
+- [reading a table another engine writes](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/read-a-table-another-engine-writes.md)
+- [time travel](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/how-to/time-travel.md)
 
 **Operations**
 
-- [`docs/installing.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/installing.md)
+- [`docs/installing.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/installing.md)
   — the external-connector path, what it costs, and what currently blocks it
-- [`docs/compatibility.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/compatibility.md)
+- [`docs/compatibility.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/compatibility.md)
   — what is proven, on which backend, against which version, and what is merely shipped
-- [`docs/troubleshooting.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/troubleshooting.md)
   — every `PZDL` code, plus the symptoms that arrive with no code at all
-- [`docs/limitations.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/limitations.md)
+- [`docs/limitations.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/limitations.md)
   — what this connector cannot do, and the measured behaviours to plan around
 
 ## What is proven
@@ -183,7 +183,7 @@ Every backend claim in this repository is a test, and the gaps are stated rather
 assumption. In short: local filesystem and S3 (MinIO) are covered for `append`, `replace`, `merge`,
 read-back through both engines, and concurrent commits; **Azure `replace`, `merge` and concurrency are
 not proven**; and **no test here has ever talked to Amazon S3 or to Azure Storage** — both are
-emulators. [`docs/compatibility.md`](https://github.com/coccor/pz-connector-deltalake/blob/main/docs/compatibility.md)
+emulators. [`docs/compatibility.md`](https://github.com/PipelineZ/pz-connector-deltalake/blob/main/docs/compatibility.md)
 is the matrix.
 
 One gap is worth repeating because it is easy to miss: through pz,
