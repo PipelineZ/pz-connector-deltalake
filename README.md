@@ -7,23 +7,29 @@ Reads through DuckDB's `delta` extension, so rows never enter .NET. Writes — `
 
 ## Read this before you install it
 
-**1. It requires pz 0.3.0 or newer**, and compiles against `Pz.Connectors.Abstractions` 0.3.0.
-Verified on linux-x64 against the released pz 0.3.0:
-`scripts/verify-external-connector.sh` reports **no gaps** and passes under `PZ_VERIFY_STRICT=1`.
+**1. It requires pz 0.5.1 or newer, and runs in its own process.** pz spawns the connector binary
+the package ships for your platform and talks to it over the connector process protocol (PCP);
+nothing from this package is loaded into pz itself. The connector is written against
+`Pz.Connectors.Abstractions` 0.5.1 and served by `Pz.Connectors.Sdk` 0.5.1. Verified on linux-x64
+against the released pz 0.5.1: `scripts/verify-external-connector.sh` restores, runs both
+directions, retries, and passes the PCP conformance vectors end to end.
 
-**2. It is a 222 MB download.** `DeltaLake.Net` ships every RID's Rust libraries in one package, and
-`pz restore` prints nothing while fetching it. It is not hung — wait it out. 139 MB then lands in
-`~/.pz/cache` and 277 MB in `.pz/packages`, the `linux-x64` pair included. All measured on linux-x64
-with a cold cache, none projected; `docs/installing.md` has the full table.
+**2. It is a 348 MB download.** The package ships a self-contained connector binary for four
+platforms, each beside its own copy of delta-rs's two Rust libraries, and `pz restore` fetches the
+whole nupkg before materializing only your platform's files. `pz restore` prints nothing while
+fetching it. It is not hung — wait it out. 188 MB then lands in `.pz/packages`: a 51 MB binary and
+the 138 MB `linux-x64` Rust pair. All measured on linux-x64 with a cold cache, none projected;
+`docs/installing.md` has the full table.
 
 **3. Platforms.**
 
 | RID | status |
 |---|---|
 | `linux-x64` | **the only platform anything here has been run on** |
-| `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` | shipped by `DeltaLake.Net`, never tested here |
-| `linux-musl-x64` (Alpine) | reachable — pz selects native assets through the RID graph so a musl host resolves `linux-x64` — **never tested here** |
-| `win-arm64` | **unsupported** — `DeltaLake.Net` ships no assets for it |
+| `linux-arm64`, `osx-arm64`, `win-x64` | shipped — a binary and the matching Rust pair are in the package — never tested here |
+| `osx-x64` | **not shipped.** `DeltaLake.Net` has the Rust pair for it, but the package publishes the SDK's default platform set; ask if you need it |
+| `linux-musl-x64` (Alpine) | pz resolves a musl host to the `linux-x64` binary through the RID graph, but that binary is linked against glibc — **never tested here** |
+| `win-arm64` | **unsupported** — `DeltaLake.Net` ships no Rust libraries for it |
 
 Shipped is not tested. CI runs ubuntu only, and deliberately: the object-store suites cannot pull
 Linux images on a Windows runner.
@@ -58,9 +64,9 @@ report:
   root: out/report
 ```
 
-`root:` must be absolute. pz hands a third-party connector no project-directory anchor, so a relative
-root would resolve against whatever directory pz was launched from — this connector refuses one
-(PZDL0101) rather than guess. Reading it from the environment keeps the project portable.
+`root:` must be absolute. This connector declares no project-directory anchor, so a relative root
+would resolve against the working directory of a connector process you never launched — it refuses
+one (PZDL0101) rather than guess. Reading it from the environment keeps the project portable.
 
 **`project.yml`** — the connector is declared by package id, exactly as any other:
 
@@ -70,7 +76,7 @@ version: 0.1.0
 
 connectors:
   - package: Pz.Connector.DeltaLake
-    version: 0.1.0
+    version: 0.2.0
 ```
 
 **`pipelines/orders_delta.sql`** — an upsert into a table the first run creates:
@@ -201,9 +207,18 @@ dotnet test  Pz.Connector.DeltaLake.slnx -c Release --no-build
 PZ_TESTS_OFFLINE=1 dotnet test Pz.Connector.DeltaLake.slnx -c Release --no-build
 ```
 
-`scripts/verify-external-connector.sh` packs the connector and runs `samples/delta-roundtrip/` end to
-end against it. `PZ_VERIFY_STRICT=1` makes it fail on pz's materializer defects instead of staging
-around them — that is the mode that goes green the day pz fixes them.
+`scripts/verify-external-connector.sh` publishes the connector for this machine's platform, packs
+it, and runs `samples/delta-roundtrip/` end to end against the released pz: restore, both
+directions, `pz retry`, the PCP conformance vectors, and repeated spawns from one `pz mcp` process.
+A release publishes four platforms first (`.github/workflows/release.yml`):
+
+```bash
+for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+  dotnet restore src/Pz.Connector.DeltaLake -r "$rid"
+  dotnet publish src/Pz.Connector.DeltaLake -c Release -r "$rid" --no-restore
+done
+dotnet pack src/Pz.Connector.DeltaLake -c Release -o packages
+```
 
 ## Licence
 

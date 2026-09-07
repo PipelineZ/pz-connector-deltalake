@@ -1,1 +1,0 @@
-{ "name": "deltalake", "protocolMajorMin": 1, "protocolMajorMax": 1, "capabilities": ["source", "sink"] }

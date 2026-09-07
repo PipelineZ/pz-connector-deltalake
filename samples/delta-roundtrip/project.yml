@@ -5,9 +5,9 @@ version: 0.1.0
 # `pz restore` resolves this against the host feeds (--feeds, else PZ_FEEDS, else nuget.org) and
 # materializes it under .pz/packages; localfiles needs no declaration because it is builtin.
 #
-# 0.1.0 is this connector's first tagged release. Until that tag exists there is nothing on
-# nuget.org under this id, so `scripts/verify-external-connector.sh` rewrites this line to the
-# version it just packed. See README.md.
+# 0.2.0 is the first release that runs out of process (pz 0.5.1+). Until that tag exists there is
+# nothing on nuget.org under this id that pz 0.5.1 accepts, so `scripts/verify-external-connector.sh`
+# rewrites this line to the version it just packed. See README.md.
 connectors:
   - package: Pz.Connector.DeltaLake
-    version: 0.1.0
+    version: 0.2.0

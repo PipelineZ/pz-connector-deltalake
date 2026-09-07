@@ -56,33 +56,30 @@ Three things follow from that, and each one shows up in the reference pages:
 - **`replace` and `merge` buffer everything.** Their semantics are defined over the entire input, so
   for those the buffer *is* the write. That is a real memory limit on a large output.
 
-## A Rust library is loaded into your process
+## A Rust library is loaded into the connector's process — not into pz
 
 `DeltaLake.Net` is a .NET binding over delta-rs. Two native Rust libraries come with it —
-`libdelta_rs_bridge` and `libdelta_kernel_ffi` — and both are loaded into the pz process.
+`libdelta_rs_bridge` and `libdelta_kernel_ffi` — and both are loaded by the connector process.
 
-**How they get there.** pz loads each connector package into its own collectible
-`AssemblyLoadContext`. A fixed list of assemblies unifies to the host (the connector ABI,
-Apache.Arrow, `System.*`, logging abstractions); everything else is private to that context. Native
-libraries resolve through the load context's own unmanaged-DLL hook, which probes the package's
-`native/` directory.
+**How they get there.** The connector is served out of process by `Pz.Connectors.Sdk`: `dotnet
+publish -r <rid>` produces a self-contained single-file binary with the two Rust libraries beside it,
+`dotnet pack` ships one such directory per platform under `runtimes/<rid>/native/`, and `pz restore`
+flattens this host's into `<package>/native/`. `pz run` spawns `native/Pz.Connector.DeltaLake` and
+talks to it over the connector process protocol (PCP); the binary's own host resolves the Rust
+libraries from its directory. Nothing here is loaded into pz, so pz's own Arrow version, DuckDB
+version and trimming settings are not this connector's concern — only the Arrow *wire* format is
+shared, across the PCP data plane.
 
-Two facts make that work here rather than by luck:
-
-- **`DeltaLake.Net` depends on `Apache.Arrow` 23.0.0 — the exact version pz pins.** Arrow is a
-  *shared* assembly unified to the host, so a major-version mismatch would have been fatal and
-  unfixable from this side.
-- **`DeltaLake.dll` P/Invokes both native libraries directly**, and the bridge carries no `DT_NEEDED`
-  entry on the kernel, so both go through the managed hook rather than the OS loader's own dependency
-  resolution. There is no RPATH problem to solve.
-
-**What this costs you.** `DeltaLake.Net` ships every RID's Rust libraries in one package: a 222 MB
-download, of which 138 MB is the `linux-x64` native pair. Sizes, timings, and the platforms that are
-supported and unsupported are in [../installing.md](../installing.md) and the README.
+**What this costs you.** A self-contained binary carries its own .NET runtime, once per platform, and
+each platform carries its own Rust pair: a 348 MB download for the four-platform package, of which
+188 MB is materialized on a `linux-x64` host (51 MB binary, 138 MB Rust pair). Sizes, timings, and
+the platforms that are supported and unsupported are in [../installing.md](../installing.md) and the
+README.
 
 **And what it means when it breaks.** A failure inside a Rust library does not always arrive as a .NET
-exception. It can be a `DllNotFoundException` (the library is not on the probe path), a `dlopen`
-architecture error (the wrong RID's library is), or a process abort with no managed exception at all.
+exception. It can be a `DllNotFoundException` (the library is not beside the binary), a `dlopen`
+architecture error (the wrong platform's library is), or an abort of the connector process with no
+managed exception at all — which pz reports as a lost connector rather than dying with it.
 [../troubleshooting.md](../troubleshooting.md) names the shapes this connector has actually seen.
 
 ## Every delta-rs call runs on a 32 MiB stack

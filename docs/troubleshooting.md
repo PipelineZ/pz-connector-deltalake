@@ -385,9 +385,9 @@ delta-rs instead.
 
 ### `pz restore` prints nothing for a minute
 
-**It is not hung.** `DeltaLake.Net` ships every RID's Rust libraries in one package: a 222 MB download
-behind a progress-free command. Wait it out. The second restore is a cache hit and prints in under a
-second.
+**It is not hung.** The package ships a self-contained binary and the Rust pair for four platforms:
+a 348 MB download behind a progress-free command, of which only your platform's 188 MB is
+materialized. Wait it out. The second restore is a cache hit and prints in under a second.
 
 The first `pz run` on a machine also downloads DuckDB's `delta` extension. That one is small, but it
 is a second network round trip, so a fully offline first run is not possible.
@@ -398,9 +398,10 @@ Measured on linux-x64 with a cold cache:
 
 | | |
 |---|---|
-| `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz materializes it | 277 MB — the RID-correct pair |
-| the `linux-x64` native pair alone | 138 MB |
+| the released nupkg (four platforms) — the download | 348 MB |
+| `.pz/packages` as pz materializes it — this platform only | 188 MB |
+| the connector binary alone | 51 MB |
+| the `linux-x64` Rust pair alone | 138 MB |
 
 On top of that, a Delta table only grows: a `remove` action does not delete a file, so every merge and
 every `replace` leaves its predecessor on disk. This connector surfaces no vacuum and no compaction,
@@ -408,20 +409,25 @@ because pz has no verb that maps to table maintenance — see [limitations.md](l
 
 ### The platform is not supported
 
-`DeltaLake.Net` ships `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64`. Two things are
+The package ships a binary and the matching Rust pair for `linux-x64`, `linux-arm64`, `osx-arm64`
+and `win-x64`; a host with none of those fails `pz run` with PZ0354 naming the RID. Three things are
 worth knowing before they cost you an afternoon:
 
-- **`linux-musl-x64` (Alpine) is reachable but untested.** pz selects native assets through a RID
-  graph, so a musl host resolves `linux-x64` — but nothing here has been run on it.
-- **`win-arm64` is not shipped at all** by `DeltaLake.Net`, so there is nothing to match.
+- **`linux-musl-x64` (Alpine) resolves but is untested.** pz picks an entrypoint through a RID graph,
+  so a musl host is handed the `linux-x64` binary — which is linked against glibc. Nothing here has
+  been run on it.
+- **`osx-x64` is not shipped**, although `DeltaLake.Net` has a Rust pair for it; the package publishes
+  the SDK's default platform set.
+- **`win-arm64` is not shipped at all** by `DeltaLake.Net`, so there is nothing to build.
 
 And **linux-x64 is the only platform anything here has been run on.** What the package ships is not
 what has been tested; [compatibility.md](compatibility.md) keeps those two lists separate.
 
 ### The process dies with no exception
 
-A Rust library is loaded into your process, and not every failure inside it arrives as a .NET
-exception.
+A Rust library is loaded into the connector's process, and not every failure inside it arrives as a
+.NET exception. When the connector process dies, pz reports the lost connector and fails the node;
+pz itself stays up.
 
 - **A stack overflow used to be the likely cause.** delta-kernel-rs can exhaust a default .NET thread
   stack on Unix, which kills the process outright. This connector runs every delta-rs call on a
