@@ -62,13 +62,46 @@ public class ConnectorIdentityTests
     }
 
     [Fact]
-    public void Manifest_ships_next_to_the_assembly_and_declares_protocol_1()
+    public async Task Manifest_mode_writes_a_process_manifest_from_the_connector_itself()
     {
-        var dir = Path.GetDirectoryName(typeof(DeltaLakeConnector).Assembly.Location)!;
-        var json = File.ReadAllText(Path.Combine(dir, "pz.connector.json"));
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
-        Assert.Equal("deltalake", doc.RootElement.GetProperty("name").GetString());
-        Assert.Equal(1, doc.RootElement.GetProperty("protocolMajorMin").GetInt32());
-        Assert.Equal(1, doc.RootElement.GetProperty("protocolMajorMax").GetInt32());
+        // The manifest is no longer a hand-written file: `dotnet pack` runs the published binary in
+        // --pz-manifest mode and ships what it prints, so the manifest and the PCP handshake come
+        // from the same object. The test-time build output holds the same entry assembly, so it is
+        // driven the same way here; what it writes is what `pz restore` reads.
+        var assembly = typeof(DeltaLakeConnector).Assembly.Location;
+        var outFile = Path.Combine(Path.GetTempPath(), $"pz-deltalake-manifest-{Guid.NewGuid():N}.json");
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "dotnet",
+                ArgumentList = { assembly, "--pz-manifest", "--out", outFile,
+                    "--entrypoint", "linux-x64=native/Pz.Connector.DeltaLake" },
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            })!;
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, $"manifest mode exited {process.ExitCode}: {stderr}");
+
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(outFile));
+            var root = doc.RootElement;
+            Assert.Equal("deltalake", root.GetProperty("name").GetString());
+            Assert.Equal(1, root.GetProperty("protocolMajorMin").GetInt32());
+            Assert.Equal(1, root.GetProperty("protocolMajorMax").GetInt32());
+            Assert.Equal("process", root.GetProperty("runtime").GetString());
+            Assert.Equal("native/Pz.Connector.DeltaLake",
+                root.GetProperty("entrypoints").GetProperty("linux-x64").GetString());
+            // root: stays absolute (PZDL0101), so no project-directory anchor is declared.
+            Assert.False(root.TryGetProperty("projectDirectoryAnchor", out _));
+            var capabilities = root.GetProperty("capabilities").EnumerateArray().Select(c => c.GetString()).ToList();
+            Assert.Contains("NativeScan", capabilities);
+            Assert.Contains("Merge", capabilities);
+            Assert.DoesNotContain("SyncState", capabilities);
+        }
+        finally
+        {
+            File.Delete(outFile);
+        }
     }
 }

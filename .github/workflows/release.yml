@@ -21,22 +21,22 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60 # four self-contained publishes, each carrying the 144 MB Rust pair.
     environment: release # scopes NUGET_USER to this job, and supports required-reviewer gating.
     permissions:
       contents: read
       id-token: write # required for NuGet/login's OIDC exchange.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # MinVer computes the release version from this tag plus history.
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
       - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
       # PZ_TESTS_OFFLINE=1 here, where ci.yml deliberately does NOT set it. Releasing is not the
       # moment to depend on network reachability: a nuget.org blip or a failed DuckDB extension
-      # download would block a release on a commit CI already passed green. The 55 tests the flag
+      # download would block a release on a commit CI already passed green. The tests the flag
       # skips are exactly the ones whose extra failure mode is the network, and ci.yml ran them on
       # this same commit before it was tagged.
       - run: >
@@ -44,7 +44,40 @@ jobs:
           --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
         env:
           PZ_TESTS_OFFLINE: '1'
-      - run: dotnet pack src/Pz.Connector.DeltaLake/Pz.Connector.DeltaLake.csproj -c Release -o packages --no-build
+      # One self-contained single-file publish per RID the package ships; pack collects them all
+      # (the SDK's PzRuntimeIdentifiers default) and writes the manifest by running the linux-x64
+      # binary. A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
+      # cache: the restore folded into `publish -r` alone does not pull the RID-specific runtime pack
+      # this self-contained build needs (NETSDK1112), even though the same restore run standalone does.
+      - run: |
+          set -euo pipefail
+          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+            dotnet restore src/Pz.Connector.DeltaLake -r "$rid"
+            dotnet publish src/Pz.Connector.DeltaLake -c Release -r "$rid" --no-restore
+          done
+          dotnet pack src/Pz.Connector.DeltaLake -c Release -o packages
+      # The manifest is what `pz restore` reads: a wrong runtime, name or capability set, or a RID
+      # whose entrypoint never made it into the pack, is only discovered by whoever installs the
+      # release. Assert it here, while the push has not happened and a version can still be skipped
+      # -- a pushed nuget.org version cannot be replaced. The Rust pair is asserted per RID for the
+      # same reason: a publish that dropped one would still pack and still pass the manifest check.
+      - name: Assert the packed manifest and native assets before publishing
+        run: |
+          set -euo pipefail
+          VERSION="$(ls packages/Pz.Connector.DeltaLake.*.nupkg | sed -E 's|.*/Pz\.Connector\.DeltaLake\.(.*)\.nupkg|\1|')"
+          PKG="packages/Pz.Connector.DeltaLake.${VERSION}.nupkg"
+          unzip -p "${PKG}" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "deltalake"' manifest.json
+          grep -q '"NativeScan"' manifest.json
+          ! grep -q 'projectDirectoryAnchor' manifest.json
+          LISTING="$(unzip -l "${PKG}")"
+          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+            grep -q "\"${rid}\":" manifest.json
+            grep -q "runtimes/${rid}/native/libdelta_rs_bridge\." <<<"${LISTING}"
+            grep -q "runtimes/${rid}/native/libdelta_kernel_ffi\." <<<"${LISTING}"
+          done
+          ls -l packages
       - name: NuGet login (trusted publishing)
         id: login
         uses: NuGet/login@v1

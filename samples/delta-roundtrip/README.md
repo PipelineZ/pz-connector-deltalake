@@ -6,26 +6,27 @@ A runnable pz project that seeds a Delta table from a CSV and reads it back thro
 ```yaml
 connectors:
   - package: Pz.Connector.DeltaLake
-    version: 0.1.0
+    version: 0.2.0
 ```
 
 `scripts/verify-external-connector.sh` at the repository root runs this project end to end against a
-locally packed build. **Read `docs/installing.md` before running it by hand**: against pz 0.2.2 the
-connector does not load from a restored package, for reasons in pz's package materializer, and that
-script is what stages around them.
+locally published and packed build. It needs pz 0.5.1 or newer: the connector runs in its own
+process, and `docs/installing.md` says what that means for a project.
 
 ## Running it
 
 Three things this project needs that a `localfiles`-only project does not:
 
-1. **A version that exists.** `project.yml` pins `0.1.0`, this connector's first tagged release.
-   Until that tag exists there is nothing on nuget.org under this id; the verify script rewrites the
-   line to whatever it just packed. Running the sample by hand before that release means pointing
+1. **A version that exists.** `project.yml` pins `0.2.0`, the first release that runs out of
+   process. Until that tag exists there is nothing on nuget.org under this id that pz 0.5.1 accepts
+   (0.1.0 is an in-process package, refused with PZ0360); the verify script rewrites the line to
+   whatever it just packed. Running the sample by hand before that release means pointing
    `pz restore --feeds` at a local folder feed and pinning the version you packed.
 
-2. **An absolute `root:`, supplied through the environment.** pz gives a third-party connector no
-   project-directory anchor, so a relative root would resolve against wherever pz was launched from
-   and this connector refuses one (`PZDL0101`). `connections.yml` reads `${DELTA_LAKE_ROOT}`:
+2. **An absolute `root:`, supplied through the environment.** This connector declares no
+   project-directory anchor, so a relative root would resolve against the working directory of a
+   connector process you never launched, and it refuses one (`PZDL0101`). `connections.yml` reads
+   `${DELTA_LAKE_ROOT}`:
 
    ```bash
    export DELTA_LAKE_ROOT="$PWD/out/lake"
@@ -43,7 +44,8 @@ Three things this project needs that a `localfiles`-only project does not:
    pz run orders_report     # that Delta table -> out/report/orders_report/*.csv
    ```
 
-`pz restore` downloads about 222 MB and prints nothing while it does. It is not hung.
+`pz restore` downloads about 348 MB (the released package ships four platforms) and prints nothing
+while it does. It is not hung.
 
 ## What it demonstrates, and what it does not
 

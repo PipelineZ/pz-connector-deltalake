@@ -81,22 +81,23 @@ that difference is known to matter are written up in `docs/limitations.md` and
 ## Through pz, as an installed package
 
 Every row above is this connector driven directly, in this repository's own test suite. The other
-path — declared by package id in a `project.yml`, resolved by `pz restore`, loaded by pz's connector
+path — declared by package id in a `project.yml`, resolved by `pz restore`, spawned by pz's process
 host — is exercised by `scripts/verify-external-connector.sh`, and it is covered less:
 
 | | status |
 |---|---|
 | `pz restore` resolves and downloads the package | yes |
-| the materialized package is loadable | yes, linux-x64 (`installing.md`) |
-| the connector ALC loads it, natives and all | yes, linux-x64 |
+| the binary and both Rust libraries are materialized intact under `native/` | yes, linux-x64 (`installing.md`) |
+| pz spawns the connector and completes the PCP handshake | yes, linux-x64 |
 | `merge` write + `delta_scan` read-back through a real `pz run` | yes, linux-x64, local filesystem |
-| `pz retry` reloads the connector and reuses the staged Delta extraction | yes, linux-x64 |
+| `pz retry` respawns the connector and reuses the staged Delta extraction | yes, linux-x64 |
+| `pz connector test` conformance vectors | write-side vectors pass; read vectors are inapplicable (native-scan only, PZ0312) |
 | `partition_by` | **declarable through pz** via `ColumnPartitionedWrites` (`reference/write.md`) |
 | any platform other than linux-x64 | **not tested** |
 
-**linux-x64 is the only platform anything here has been run on.** `DeltaLake.Net` ships `linux-x64`,
-`linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64` — that is what it SHIPS, not what is TESTED. It
-ships no `win-arm64` at all. CI runs ubuntu only, and deliberately: the object-store suites cannot
+**linux-x64 is the only platform anything here has been run on.** The package ships `linux-x64`,
+`linux-arm64`, `osx-arm64` and `win-x64` — that is what it SHIPS, not what is TESTED. `DeltaLake.Net`
+also has an `osx-x64` Rust pair the package does not currently publish, and no `win-arm64` at all. CI runs ubuntu only, and deliberately: the object-store suites cannot
 pull Linux images on a Windows runner, so a Windows leg could only ever be build-only.
 
 The nullability rules — the `NOT NULL`-addition refusal, its `replace` exemption, and the
@@ -112,6 +113,6 @@ does not mean every guard on the path ran.
 | `DeltaLake.Net` | 0.33.0 |
 | delta-rs, as its own commits report it | `delta-rs:0.32.1` — the `engineInfo` field every commit this connector writes carries. The .NET package's version and the Rust crate's are NOT the same number; where a statement anywhere in these pages is about the WRITER, this is the version it was measured against. |
 | DuckDB | 1.5.5 (`DuckDB.NET.Data.Full`) |
-| connector ABI | `Pz.Connectors.Abstractions` 0.3.0 |
-| pz (the host, end-to-end run) | 0.3.0 |
-| measured on | 2026-08-22 |
+| connector ABI | `Pz.Connectors.Abstractions` 0.5.1, served by `Pz.Connectors.Sdk` 0.5.1 |
+| pz (the host, end-to-end run) | 0.5.1 (measured 2026-09-07) |
+| measured on | 2026-08-22, except where a row says otherwise |

@@ -4,22 +4,26 @@ This page is about the path a stranger takes: declare the connector by package i
 run `pz restore`, run `pz run`. `samples/delta-roundtrip/` is that project, and
 `scripts/verify-external-connector.sh` is that path exercised end to end.
 
-**This connector requires pz 0.3.0 or newer**, and compiles against `Pz.Connectors.Abstractions`
-0.3.0. Verified on linux-x64 against the released 0.3.0: `scripts/verify-external-connector.sh`
-reports **no gaps at all** and passes under `PZ_VERIFY_STRICT=1` — pz materializes
-`lib/net9.0/DeltaLake.dll`, puts the `linux-x64` Rust libraries on the connector's probe path
-byte-for-byte, and the merge, the `delta_scan` read-back and the `pz retry` reuse all run with
-nothing staged around them. `.pz/packages` measures 277 MB, the RID-correct pair.
+**This connector requires pz 0.5.1 or newer, and runs in its own process.** Every third-party
+connector does (PZ0360): the package ships a self-contained binary per platform, its manifest says
+`runtime: "process"`, and pz spawns that binary and talks to it over the connector process protocol
+(PCP). Nothing from this package is loaded into pz. The connector compiles against
+`Pz.Connectors.Abstractions` 0.5.1 and is served by `Pz.Connectors.Sdk` 0.5.1, which also
+generates the manifest by running the binary — so the manifest and the handshake cannot disagree.
 
-`scripts/verify-external-connector.sh` compares what pz materialized against what
-`dotnet publish -r <rid>` resolves from the same packages, so it doubles as a regression check on
-that materialization. Run it with `PZ_VERIFY_STRICT=1` to fail the build on any gap it finds.
+Verified on linux-x64 against the released 0.5.1: `scripts/verify-external-connector.sh` publishes
+and packs the connector, restores it from a local feed, asserts that pz materialized the binary and
+both Rust libraries byte-for-byte under the package's `native/` directory, runs the merge and the
+`delta_scan` read-back, proves `pz retry` reuses the staged extraction, and runs the PCP
+conformance vectors (`pz connector test`) against the materialized package.
 
-**Loading the connector repeatedly within one process does not crash.** Measured: three `pz mcp`
-tool calls in one server, each building and disposing its own `ConnectorHost`, each opening the
-Delta table through both Rust libraries. `ConnectorHost` requests `Unload()` on dispose but
-collection is GC-nondeterministic, so this is not evidence that a previous load context was actually
-collected — only that repeated load/unload has not been observed to crash.
+**Spawning the connector repeatedly from one pz process works.** Measured: three `pz mcp` tool
+calls in one server, each building and disposing its own connector host — which now means one
+connector process per call — each opening the Delta table through both Rust libraries.
+
+**The conformance read vectors do not apply.** `pz connector test` drives its read probes on the
+universal Arrow tier, and this source is native-scan only, so those vectors fail with PZ0312 by
+design; the verify script therefore probes the write side only.
 
 **A green end-to-end run is not blanket validation, and one gap is worth naming.** Through pz,
 `ArrowInterop.NormalizeNativeArrowSchema` forces every field `nullable: true` before a batch reaches
@@ -30,16 +34,14 @@ mean every guard on the path ran.
 
 ## `root:` must be absolute, so the sample reads it from the environment
 
-pz hands a connector no project-directory anchor. The `base_dir` option that lets `localfiles`
-resolve a relative `path:` is injected by the CLI for `localfiles` and `sqlite` by name; nothing
-reaches a third-party connector by default. pz 0.3.0 also makes a project-directory anchor available
-declaratively — a connector opts in with `"projectDirectoryAnchor": true` in its `pz.connector.json`
-and receives `base_dir` the way `localfiles` does — but **this connector does not declare it**: the
-sample's `${DELTA_LAKE_ROOT}` is explicit about where the lake lives, and an absolute root is right
-for `s3://`-family roots regardless.
+A connector receives a project-directory anchor only by declaring one: a package whose manifest
+carries `"projectDirectoryAnchor": true` (the SDK's `PzProjectDirectoryAnchor` property) receives
+the project directory as a `base_dir` option, the way `localfiles` does. **This connector does not
+declare it**: the sample's `${DELTA_LAKE_ROOT}` is explicit about where the lake lives, and an
+absolute root is right for `s3://`-family roots regardless.
 
-A relative `root:` would otherwise resolve against whatever directory pz was launched from, so this
-connector refuses one with `PZDL0101` rather than guess.
+A relative `root:` would otherwise resolve against the working directory of a connector process the
+user never launched, so this connector refuses one with `PZDL0101` rather than guess.
 
 Give it an absolute local path or an `s3://`/`az://`-family URI. The sample uses an environment
 variable so the project stays portable:
@@ -52,19 +54,21 @@ lake:
 
 ## What the dependency costs, and how long it looks broken
 
-Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0:
+Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0, `Pz.Connectors.Sdk` 0.5.1:
 
 | | |
 |---|---|
-| this connector's own nupkg | 52 KB |
-| `DeltaLake.Net` nupkg — every RID in one package | **222 MB**, and this is the download |
-| `~/.pz/cache` after one restore | 125 MB |
-| `.pz/packages` as pz materializes it | **277 MB** — the RID-correct pair, nothing bridged |
-| the `linux-x64` native pair alone | 138 MB |
+| the released nupkg — four platforms, each a self-contained binary plus its Rust pair | **348 MB**, and this is the download |
+| the same package built for one platform (what the verify script packs) | 90 MB |
+| `.pz/packages` as pz materializes it — this platform's files only | **188 MB** |
+| the connector binary alone | 51 MB |
+| the `linux-x64` Rust pair alone | 138 MB |
 
-Sizes are `du -h` (so MiB), measured, none projected.
+Sizes are `du -h` (so MiB), measured, none projected. The download grew from the previous in-process
+packaging's 222 MB because a self-contained binary carries its own .NET runtime, once per platform;
+what lands on disk shrank, because only your platform's Rust pair is materialized.
 
-**`pz restore` looks hung and is not.** A 222 MB download behind a progress-free command is a minute
+**`pz restore` looks hung and is not.** A 348 MB download behind a progress-free command is a minute
 or more on a normal connection, and the first thing a new user does after 90 seconds of silence is
 kill it and conclude the connector is broken. Wait it out. The second restore is a cache hit and
 prints in under a second.

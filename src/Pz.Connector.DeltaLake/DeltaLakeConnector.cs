@@ -1,6 +1,5 @@
 using Pz.Connectors.Abstractions;
 
-[assembly: PzConnector("deltalake", typeof(Pz.Connector.DeltaLake.DeltaLakeConnector))]
 
 namespace Pz.Connector.DeltaLake;
 

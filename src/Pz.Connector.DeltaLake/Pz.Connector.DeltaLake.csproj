@@ -1,22 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <OutputType>Exe</OutputType>
     <PackageId>Pz.Connector.DeltaLake</PackageId>
-    <Description>Delta Lake source and sink connector for PipelineZ (pz). Reads via DuckDB's delta extension, writes append/replace/merge via delta-rs.</Description>
+    <Description>Delta Lake source and sink connector for PipelineZ (pz), served out of process. Reads via DuckDB's delta extension, writes append/replace/merge via delta-rs.</Description>
     <PackageTags>pipelinez;pipelinez-connector;pz;delta-lake;deltalake;lakehouse;etl;duckdb;arrow</PackageTags>
+    <!-- DeltaLake.Net is a P/Invoke wrapper over two Rust libraries with no Native AOT support, so
+         this connector ships as a self-contained single-file CoreCLR binary; the Rust libraries
+         travel beside it under runtimes/<rid>/native/. -->
+    <PzPackaging>self-contained</PzPackaging>
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.3.0" />
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.5.1" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.5.1" />
     <PackageReference Include="DeltaLake.Net" Version="0.33.0" />
     <PackageReference Include="Apache.Arrow" Version="23.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- The manifest ships at the nupkg root AND next to the assembly: the first is what the host
-         reads to gate protocol compatibility, the second is what lets tests load this build output
-         as if it were a materialized package. -->
-    <None Include="pz.connector.json" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
