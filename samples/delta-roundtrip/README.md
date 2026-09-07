@@ -44,7 +44,7 @@ Three things this project needs that a `localfiles`-only project does not:
    pz run orders_report     # that Delta table -> out/report/orders_report/*.csv
    ```
 
-`pz restore` downloads about 348 MB (the released package ships four platforms) and prints nothing
+`pz restore` downloads roughly 210 MB (the released package ships four platforms) and prints nothing
 while it does. It is not hung.
 
 ## What it demonstrates, and what it does not
