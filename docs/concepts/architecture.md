@@ -70,8 +70,8 @@ libraries from its directory. Nothing here is loaded into pz, so pz's own Arrow 
 version and trimming settings are not this connector's concern — only the Arrow *wire* format is
 shared, across the PCP data plane.
 
-**What this costs you.** Each platform carries its own Rust pair beside a 13 MB native image: roughly
-210 MB for the four-platform package, of which 150 MB is materialized on a `linux-x64` host. The
+**What this costs you.** Each platform carries its own Rust pair beside a 13 MB native image: 200 MB
+for the four-platform package, of which 150 MB is materialized on a `linux-x64` host. The
 Rust pair is the floor, which is why the binary is Native AOT rather than a self-contained CoreCLR
 single file — the latter is 51 MB per platform, and four of those plus the Rust pairs exceed
 nuget.org's 250 MB package cap. Sizes, timings, and
