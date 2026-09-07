@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end proof that this connector is installable and runnable the way a stranger would use it:
-# publish (self-contained, this machine's RID) -> pack -> local folder feed -> `pz restore` resolves
+# publish (Native AOT, this machine's RID) -> pack -> local folder feed -> `pz restore` resolves
 # it from that feed and materializes this RID's binary -> `pz run` moves real data through both
 # directions (delta-rs write, delta_scan read) -> `pz retry` reuses the staged extraction ->
 # `pz connector test` runs the PCP conformance vectors against the materialized package ->
@@ -13,14 +13,14 @@
 # as published -- the directory the manifest's entrypoint points at -- and that pz can spawn it.
 #
 # NOT hermetic, unlike pz's own verify script: the local feed carries this connector, but `pz`, the
-# .NET runtime pack the self-contained publish needs, and DuckDB's `delta` extension are fetched from
+# ILCompiler pack the Native AOT publish needs, and DuckDB's `delta` extension are fetched from
 # the network.
 #
 # Two feed mechanisms are in play and they are not the same one. `dotnet tool install` reads the
 # NuGet.Config written below; `pz restore` never reads NuGet.Config at all -- its feeds come from
 # --feeds, else PZ_FEEDS, else nuget.org -- so the local feed is passed to it explicitly.
 #
-# NEEDS ROUGHLY 1 GB OF FREE SPACE UNDER TMPDIR: a self-contained publish, the packed nupkg, a cold
+# NEEDS ROUGHLY 1 GB OF FREE SPACE UNDER TMPDIR: a Native AOT publish, the packed nupkg, a cold
 # package cache and the materialized package. Where /tmp is a small tmpfs run it as
 # `TMPDIR=/var/tmp scripts/verify-external-connector.sh`.
 set -euo pipefail
@@ -53,10 +53,10 @@ echo "work dir: ${WORK_DIR}"
 RID="$(dotnet --info | sed -n 's/^ *RID: *//p' | head -1)"
 echo "rid:      ${RID}"
 
-echo "-- Publishing the connector for ${RID} (self-contained single file) --"
+echo "-- Publishing the connector for ${RID} (Native AOT) --"
 # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet cache: the
 # restore folded into `publish -r` alone does not pull the RID-specific runtime pack this
-# self-contained build needs (NETSDK1112), even though the same restore run standalone does.
+# build needs (NETSDK1112), even though the same restore run standalone does.
 dotnet restore "${PROJECT}" -r "${RID}" --nologo -v quiet
 dotnet publish "${PROJECT}" -c Release -r "${RID}" --no-restore -p:PzNativeStaging="${STAGE_DIR}" \
   --nologo -v quiet
@@ -64,6 +64,13 @@ STAGED="${STAGE_DIR}${RID}"
 for f in Pz.Connector.DeltaLake libdelta_rs_bridge.so libdelta_kernel_ffi.so; do
   [[ -f "${STAGED}/${f}" ]] || { echo "FAIL: publish did not stage ${f} under ${STAGED}" >&2; exit 1; }
 done
+# A native image and nothing managed beside it. The SDK's PublishAot derivation can miss restore
+# when it arrives through the NuGet package, and the fallback is a silent non-AOT layout that
+# packs and runs -- at three times the size that fits four platforms under nuget.org's cap.
+[[ ! -f "${STAGED}/Pz.Connector.DeltaLake.dll" ]] || {
+  echo "FAIL: publish staged a managed Pz.Connector.DeltaLake.dll; this is not a Native AOT publish" >&2; exit 1; }
+[[ ! -f "${STAGED}/libcoreclr.so" ]] || {
+  echo "FAIL: publish staged libcoreclr.so; this is a CoreCLR layout, not a Native AOT publish" >&2; exit 1; }
 
 echo "-- Packing the connector to a local folder feed --"
 # PzRuntimeIdentifiers is narrowed to the one RID this machine published: the package under test

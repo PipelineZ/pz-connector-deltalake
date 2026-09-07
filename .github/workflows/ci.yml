@@ -43,11 +43,11 @@ jobs:
   # The other half of the proof: that a stranger can declare this connector by package id, run
   # `pz restore`, and have pz spawn it. It is a separate job because it is a separate risk -- the
   # suite above never touches pz's resolver, package materializer, or process host, and the script
-  # is what proves the self-contained publish, the generated manifest and the PCP handshake all fit
+  # is what proves the Native AOT publish, the generated manifest and the PCP handshake all fit
   # together against the released pz.
   verify-external-connector:
     runs-on: ubuntu-latest
-    timeout-minutes: 40 # a self-contained publish plus the DeltaLake.Net download on a cold cache.
+    timeout-minutes: 40 # a Native AOT publish plus the DeltaLake.Net download on a cold cache.
     steps:
       - uses: actions/checkout@v7
         with:

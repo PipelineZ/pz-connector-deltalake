@@ -62,7 +62,7 @@ Three things follow from that, and each one shows up in the reference pages:
 `libdelta_rs_bridge` and `libdelta_kernel_ffi` — and both are loaded by the connector process.
 
 **How they get there.** The connector is served out of process by `Pz.Connectors.Sdk`: `dotnet
-publish -r <rid>` produces a self-contained single-file binary with the two Rust libraries beside it,
+publish -r <rid>` produces a Native AOT binary with the two Rust libraries beside it,
 `dotnet pack` ships one such directory per platform under `runtimes/<rid>/native/`, and `pz restore`
 flattens this host's into `<package>/native/`. `pz run` spawns `native/Pz.Connector.DeltaLake` and
 talks to it over the connector process protocol (PCP); the binary's own host resolves the Rust
@@ -70,9 +70,11 @@ libraries from its directory. Nothing here is loaded into pz, so pz's own Arrow 
 version and trimming settings are not this connector's concern — only the Arrow *wire* format is
 shared, across the PCP data plane.
 
-**What this costs you.** A self-contained binary carries its own .NET runtime, once per platform, and
-each platform carries its own Rust pair: a 348 MB download for the four-platform package, of which
-188 MB is materialized on a `linux-x64` host (51 MB binary, 138 MB Rust pair). Sizes, timings, and
+**What this costs you.** Each platform carries its own Rust pair beside a 13 MB native image: roughly
+210 MB for the four-platform package, of which 150 MB is materialized on a `linux-x64` host. The
+Rust pair is the floor, which is why the binary is Native AOT rather than a self-contained CoreCLR
+single file — the latter is 51 MB per platform, and four of those plus the Rust pairs exceed
+nuget.org's 250 MB package cap. Sizes, timings, and
 the platforms that are supported and unsupported are in [../installing.md](../installing.md) and the
 README.
 

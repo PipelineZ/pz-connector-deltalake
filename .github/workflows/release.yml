@@ -18,10 +18,49 @@ on:
   push:
     tags: ['v*']
 
+# Shape: Native AOT cannot cross-compile between OSes, so one `publish` job per platform produces
+# that platform's binary (with the matching Rust pair beside it) and hands the staged directory to
+# the `release` job as an artifact; `release` collects all four under bin/pz-native/, packs once,
+# asserts the manifest and assets, and pushes.
 jobs:
+  publish:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # MinVer computes the release version from this tag plus history.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet cache:
+      # the restore folded into `publish -r` alone does not pull the RID-specific packs this build
+      # needs (NETSDK1112), even though the same restore run standalone does.
+      - run: dotnet restore src/Pz.Connector.DeltaLake -r ${{ matrix.rid }}
+      - run: dotnet publish src/Pz.Connector.DeltaLake -c Release -r ${{ matrix.rid }} --no-restore
+      # The artifact name IS the RID: download-artifact without a name unpacks every artifact into
+      # <path>/<artifact name>/, which is exactly the <staging>/<rid>/ layout `dotnet pack` collects.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: src/Pz.Connector.DeltaLake/bin/pz-native/${{ matrix.rid }}
+          if-no-files-found: error
+
   release:
+    needs: publish
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # four self-contained publishes, each carrying the 144 MB Rust pair.
+    timeout-minutes: 30
     environment: release # scopes NUGET_USER to this job, and supports required-reviewer gating.
     permissions:
       contents: read
@@ -44,17 +83,16 @@ jobs:
           --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
         env:
           PZ_TESTS_OFFLINE: '1'
-      # One self-contained single-file publish per RID the package ships; pack collects them all
-      # (the SDK's PzRuntimeIdentifiers default) and writes the manifest by running the linux-x64
-      # binary. A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
-      # cache: the restore folded into `publish -r` alone does not pull the RID-specific runtime pack
-      # this self-contained build needs (NETSDK1112), even though the same restore run standalone does.
+      # Every platform's staged publish lands under bin/pz-native/<rid>/; pack collects them all (the
+      # SDK's PzRuntimeIdentifiers default) and writes the manifest by RUNNING the linux-x64 binary,
+      # which needs its executable bit back -- artifact zips do not carry file modes.
+      - uses: actions/download-artifact@v4
+        with:
+          path: src/Pz.Connector.DeltaLake/bin/pz-native
       - run: |
           set -euo pipefail
-          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
-            dotnet restore src/Pz.Connector.DeltaLake -r "$rid"
-            dotnet publish src/Pz.Connector.DeltaLake -c Release -r "$rid" --no-restore
-          done
+          chmod +x src/Pz.Connector.DeltaLake/bin/pz-native/*/Pz.Connector.DeltaLake
+          ls -lR src/Pz.Connector.DeltaLake/bin/pz-native
           dotnet pack src/Pz.Connector.DeltaLake -c Release -o packages
       # The manifest is what `pz restore` reads: a wrong runtime, name or capability set, or a RID
       # whose entrypoint never made it into the pack, is only discovered by whoever installs the

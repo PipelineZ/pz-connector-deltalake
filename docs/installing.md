@@ -5,7 +5,7 @@ run `pz restore`, run `pz run`. `samples/delta-roundtrip/` is that project, and
 `scripts/verify-external-connector.sh` is that path exercised end to end.
 
 **This connector requires pz 0.5.1 or newer, and runs in its own process.** Every third-party
-connector does (PZ0360): the package ships a self-contained binary per platform, its manifest says
+connector does (PZ0360): the package ships a Native AOT binary per platform, its manifest says
 `runtime: "process"`, and pz spawns that binary and talks to it over the connector process protocol
 (PCP). Nothing from this package is loaded into pz. The connector compiles against
 `Pz.Connectors.Abstractions` 0.5.1 and is served by `Pz.Connectors.Sdk` 0.5.1, which also
@@ -58,17 +58,20 @@ Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0, `Pz.Connectors.
 
 | | |
 |---|---|
-| the released nupkg — four platforms, each a self-contained binary plus its Rust pair | **348 MB**, and this is the download |
-| the same package built for one platform (what the verify script packs) | 90 MB |
-| `.pz/packages` as pz materializes it — this platform's files only | **188 MB** |
-| the connector binary alone | 51 MB |
+| the released nupkg — four platforms, each a Native AOT binary plus its Rust pair | **roughly 210 MB**, and this is the download |
+| the same package built for one platform (what the verify script packs) | **52 MB** |
+| `.pz/packages` as pz materializes it — this platform's files only | **150 MB** |
+| the connector binary alone | 13 MB |
 | the `linux-x64` Rust pair alone | 138 MB |
 
-Sizes are `du -h` (so MiB), measured, none projected. The download grew from the previous in-process
-packaging's 222 MB because a self-contained binary carries its own .NET runtime, once per platform;
-what lands on disk shrank, because only your platform's Rust pair is materialized.
+Sizes are `du -h` (so MiB), measured on linux-x64 except the four-platform line, which is four
+per-platform slices and confirmed by the release job. The Rust pair is the floor: it is already
+stripped, and a self-contained CoreCLR single file in place of the native image was 51 MB per
+platform — 348 MB for four, over nuget.org's 250 MB package cap. Compared with the previous
+in-process packaging's 222 MB download, what lands on disk shrank as well, because only your
+platform's Rust pair is materialized.
 
-**`pz restore` looks hung and is not.** A 348 MB download behind a progress-free command is a minute
+**`pz restore` looks hung and is not.** A 200 MB download behind a progress-free command is a minute
 or more on a normal connection, and the first thing a new user does after 90 seconds of silence is
 kill it and conclude the connector is broken. Wait it out. The second restore is a cache hit and
 prints in under a second.

@@ -5,10 +5,15 @@
     <PackageId>Pz.Connector.DeltaLake</PackageId>
     <Description>Delta Lake source and sink connector for PipelineZ (pz), served out of process. Reads via DuckDB's delta extension, writes append/replace/merge via delta-rs.</Description>
     <PackageTags>pipelinez;pipelinez-connector;pz;delta-lake;deltalake;lakehouse;etl;duckdb;arrow</PackageTags>
-    <!-- DeltaLake.Net is a P/Invoke wrapper over two Rust libraries with no Native AOT support, so
-         this connector ships as a self-contained single-file CoreCLR binary; the Rust libraries
-         travel beside it under runtimes/<rid>/native/. -->
-    <PzPackaging>self-contained</PzPackaging>
+    <!-- Native AOT: the two Rust libraries DeltaLake.Net P/Invokes travel beside the binary under
+         runtimes/<rid>/native/, and they are the size floor (138 MB uncompressed for linux-x64), so
+         the binary has to be as small as it can be for four platforms to fit under nuget.org's
+         250 MB package cap: a self-contained CoreCLR single file is 51 MB per platform, the
+         native image 13 MB. PublishAot is set here as well as by PzPackaging: through the NuGet
+         package the SDK's derivation lands after restore has already decided whether to pull the
+         ILCompiler pack, and a publish without it silently falls back to a non-AOT layout. -->
+    <PzPackaging>aot</PzPackaging>
+    <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
