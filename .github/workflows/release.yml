@@ -61,6 +61,7 @@ jobs:
       # release. Assert it here, while the push has not happened and a version can still be skipped
       # -- a pushed nuget.org version cannot be replaced. The Rust pair is asserted per RID for the
       # same reason: a publish that dropped one would still pack and still pass the manifest check.
+      # The lib prefix is optional: Windows builds ship delta_rs_bridge.dll / delta_kernel_ffi.dll.
       - name: Assert the packed manifest and native assets before publishing
         run: |
           set -euo pipefail
@@ -74,8 +75,8 @@ jobs:
           LISTING="$(unzip -l "${PKG}")"
           for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
             grep -q "\"${rid}\":" manifest.json
-            grep -q "runtimes/${rid}/native/libdelta_rs_bridge\." <<<"${LISTING}"
-            grep -q "runtimes/${rid}/native/libdelta_kernel_ffi\." <<<"${LISTING}"
+            grep -q "runtimes/${rid}/native/\(lib\)\?delta_rs_bridge\." <<<"${LISTING}"
+            grep -q "runtimes/${rid}/native/\(lib\)\?delta_kernel_ffi\." <<<"${LISTING}"
           done
           ls -l packages
       - name: NuGet login (trusted publishing)
