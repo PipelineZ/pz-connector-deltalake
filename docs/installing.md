@@ -58,14 +58,14 @@ Measured on linux-x64 with a cold cache, `DeltaLake.Net` 0.33.0, `Pz.Connectors.
 
 | | |
 |---|---|
-| the released nupkg — four platforms, each a Native AOT binary plus its Rust pair | **roughly 210 MB**, and this is the download |
+| the released nupkg — four platforms, each a Native AOT binary plus its Rust pair | **200 MB**, and this is the download |
 | the same package built for one platform (what the verify script packs) | **52 MB** |
 | `.pz/packages` as pz materializes it — this platform's files only | **150 MB** |
 | the connector binary alone | 13 MB |
 | the `linux-x64` Rust pair alone | 138 MB |
 
-Sizes are `du -h` (so MiB), measured on linux-x64 except the four-platform line, which is four
-per-platform slices and confirmed by the release job. The Rust pair is the floor: it is already
+Sizes are `du -h` (so MiB), measured: the four-platform line is the 0.2.0 package as pushed to
+nuget.org, the rest on linux-x64 with a cold cache. The Rust pair is the floor: it is already
 stripped, and a self-contained CoreCLR single file in place of the native image was 51 MB per
 platform — 348 MB for four, over nuget.org's 250 MB package cap. Compared with the previous
 in-process packaging's 222 MB download, what lands on disk shrank as well, because only your

@@ -386,7 +386,7 @@ delta-rs instead.
 ### `pz restore` prints nothing for a minute
 
 **It is not hung.** The package ships a Native AOT binary and the Rust pair for four platforms:
-roughly 210 MB behind a progress-free command, of which only your platform's 150 MB is
+a 200 MB download behind a progress-free command, of which only your platform's 150 MB is
 materialized. Wait it out. The second restore is a cache hit and prints in under a second.
 
 The first `pz run` on a machine also downloads DuckDB's `delta` extension. That one is small, but it
@@ -398,7 +398,7 @@ Measured on linux-x64 with a cold cache:
 
 | | |
 |---|---|
-| the released nupkg (four platforms) — the download | roughly 210 MB (52 MB per platform, measured on linux-x64) |
+| the released nupkg (four platforms) — the download | 200 MB |
 | `.pz/packages` as pz materializes it — this platform only | 150 MB |
 | the connector binary alone | 13 MB |
 | the `linux-x64` Rust pair alone | 138 MB |

@@ -14,12 +14,12 @@ protocol (PCP); nothing from this package is loaded into pz itself. The connecto
 against the released pz 0.5.1: `scripts/verify-external-connector.sh` restores, runs both
 directions, retries, and passes the PCP conformance vectors end to end.
 
-**2. It is a download of roughly 210 MB.** The package ships a Native AOT connector binary for four
+**2. It is a 200 MB download.** The package ships a Native AOT connector binary for four
 platforms, each beside its own copy of delta-rs's two Rust libraries, and `pz restore` fetches the
 whole nupkg before materializing only your platform's files. `pz restore` prints nothing while
 fetching it. It is not hung — wait it out. 150 MB then lands in `.pz/packages`: a 13 MB binary and
-the 138 MB `linux-x64` Rust pair. The per-platform slice is measured on linux-x64 (52 MB compressed);
-the four-platform total is the release job's number. `docs/installing.md` has the full table.
+the 138 MB `linux-x64` Rust pair. All measured — the four-platform package is the 0.2.0 release as pushed, the rest on linux-x64
+with a cold cache. `docs/installing.md` has the full table.
 
 **3. Platforms.**
 
