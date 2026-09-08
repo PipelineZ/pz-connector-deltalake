@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.TestKit" Version="0.5.1" />
+    <PackageReference Include="Pz.Connectors.TestKit" Version="0.6.0" />
     <!-- Test-only: reproduces pz's own ConnectorConfigValidator.ValidateSchema evaluation
          (JsonSchema.Net 9.2.2, the exact version Pz.Engine pins) against the shipped
          DeltaLakeSchemas.Dataset text, so the not+pattern calendar-token guard is verified
