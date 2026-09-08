@@ -18,8 +18,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Sdk" Version="0.5.1" />
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.5.1" />
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.6.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.6.0" />
     <PackageReference Include="DeltaLake.Net" Version="0.33.0" />
     <PackageReference Include="Apache.Arrow" Version="23.0.0" />
   </ItemGroup>
