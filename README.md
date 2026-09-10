@@ -10,7 +10,7 @@ Reads through DuckDB's `delta` extension, so rows never enter .NET. Writes — `
 **1. It requires pz 0.5.1 or newer, and runs in its own process.** pz spawns the Native AOT
 connector binary the package ships for your platform and talks to it over the connector process
 protocol (PCP); nothing from this package is loaded into pz itself. The connector is written against
-`Pz.Connectors.Abstractions` 0.5.1 and served by `Pz.Connectors.Sdk` 0.5.1. Verified on linux-x64
+`Pz.Connectors.Abstractions` 0.6.1 and served by `Pz.Connectors.Sdk` 0.6.1. Verified on linux-x64
 against the released pz 0.5.1: `scripts/verify-external-connector.sh` restores, runs both
 directions, retries, and passes the PCP conformance vectors end to end.
 
