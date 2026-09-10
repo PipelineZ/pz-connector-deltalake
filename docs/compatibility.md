@@ -113,6 +113,6 @@ does not mean every guard on the path ran.
 | `DeltaLake.Net` | 0.33.0 |
 | delta-rs, as its own commits report it | `delta-rs:0.32.1` — the `engineInfo` field every commit this connector writes carries. The .NET package's version and the Rust crate's are NOT the same number; where a statement anywhere in these pages is about the WRITER, this is the version it was measured against. |
 | DuckDB | 1.5.5 (`DuckDB.NET.Data.Full`) |
-| connector ABI | `Pz.Connectors.Abstractions` 0.5.1, served by `Pz.Connectors.Sdk` 0.5.1 |
+| connector ABI | `Pz.Connectors.Abstractions` 0.6.1, served by `Pz.Connectors.Sdk` 0.6.1 |
 | pz (the host, end-to-end run) | 0.5.1 (measured 2026-09-07) |
 | measured on | 2026-08-22, except where a row says otherwise |

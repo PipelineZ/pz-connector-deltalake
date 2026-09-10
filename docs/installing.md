@@ -8,7 +8,7 @@ run `pz restore`, run `pz run`. `samples/delta-roundtrip/` is that project, and
 connector does (PZ0360): the package ships a Native AOT binary per platform, its manifest says
 `runtime: "process"`, and pz spawns that binary and talks to it over the connector process protocol
 (PCP). Nothing from this package is loaded into pz. The connector compiles against
-`Pz.Connectors.Abstractions` 0.5.1 and is served by `Pz.Connectors.Sdk` 0.5.1, which also
+`Pz.Connectors.Abstractions` 0.6.1 and is served by `Pz.Connectors.Sdk` 0.6.1, which also
 generates the manifest by running the binary — so the manifest and the handshake cannot disagree.
 
 Verified on linux-x64 against the released 0.5.1: `scripts/verify-external-connector.sh` publishes
