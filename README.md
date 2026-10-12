@@ -197,6 +197,15 @@ One gap is worth repeating because it is easy to miss: through pz,
 sink, so a green end-to-end `pz run` exercises **none** of this connector's nullability rules. Their
 only coverage is this repository's own suite.
 
+## Telemetry
+
+Writes report their remote activity to pz (pz 0.11 or newer): each delta-rs insert, merge or delete
+is one request, carrying the Arrow payload bytes it was handed, and each one that succeeds is one
+commit in the table's log (`deltalake.commits`). Reads report nothing: they are a `delta_scan` that
+pz runs inside its own DuckDB, so no read byte passes through this connector and a read node carries
+no remote stats. Retries delta-rs makes internally and the bytes it actually puts on the object-store
+wire are not visible, so `wireBytes` is the Arrow payload, not network traffic.
+
 ## Building it
 
 Requires the .NET 10 SDK. Docker is optional — the object-store suites skip cleanly without it.

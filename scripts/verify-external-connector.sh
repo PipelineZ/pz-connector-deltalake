@@ -167,6 +167,15 @@ echo "  .pz/packages after restore: $(du -shL "${PROJ_DIR}/.pz/packages" | cut -
 echo "-- pz run orders_delta (seed CSV -> Delta table, strategy: merge, through the spawned connector) --"
 (cd "${PROJ_DIR}" && "${PZ}" run orders_delta)
 
+# The write reports its remote activity. Writes only: the read is a delta_scan inside pz's own DuckDB,
+# so its node carries no remote stats and the check must not demand any. Exact node count, so a run
+# that produced no deltalake node cannot pass vacuously; run on the newest run, which is this one.
+echo "-- Asserting the Delta write reported remote stats --"
+RUN_DIR="$(ls -td "${PROJ_DIR}"/.pz/runs/*/ | head -n 1)"
+jq -e '[.nodes[] | select(.connector=="deltalake" and .kind=="SinkWrite")] | (length == 1) and (map(.remote.requests > 0) | all)' \
+  "${RUN_DIR}run_results.json" >/dev/null || {
+  echo "FAIL: the deltalake SinkWrite node reported no remote requests (${RUN_DIR}run_results.json)" >&2; exit 1; }
+
 echo "-- pz run orders_report (Delta table -> CSV, through delta_scan) --"
 (cd "${PROJ_DIR}" && "${PZ}" run orders_report)
 
