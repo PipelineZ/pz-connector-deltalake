@@ -6,7 +6,9 @@ namespace Pz.Connector.DeltaLake;
 /// <summary>Delta Lake source + sink connector. Reads are a DuckDB <c>delta_scan</c> native scan and
 /// never enter .NET; writes go through delta-rs on the universal Arrow path, because DuckDB's delta
 /// extension cannot write. One capability union covers both directions — the ABI has a single
-/// <see cref="ConnectorCapabilities"/> value per connector, not one per direction.</summary>
+/// <see cref="ConnectorCapabilities"/> value per connector, not one per direction.
+/// <para>Telemetry: only writes report remote stats (see <see cref="DeltaTelemetry"/>). Reads are a
+/// native <c>delta_scan</c> executed inside pz's own DuckDB, so a read node reports nothing.</para></summary>
 public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INativeOnlySource
 {
     public ConnectorInfo Info => new("deltalake", "0.1.0", ProtocolVersion.Major);
@@ -21,7 +23,7 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
         ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow |
         ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.Merge |
         ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
-        ConnectorCapabilities.ColumnPartitionedWrites;
+        ConnectorCapabilities.ColumnPartitionedWrites | ConnectorCapabilities.ReportsStats;
 
     public string ConnectionConfigSchema => DeltaLakeSchemas.Connection;
 

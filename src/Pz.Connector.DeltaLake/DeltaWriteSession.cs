@@ -115,20 +115,7 @@ internal sealed class DeltaWriteSession(
     /// <summary>Approximate in-memory size, used only to decide when to flush a generation. Exactness
     /// does not matter; monotonicity does — which is why child buffers count too, or a batch of nested
     /// columns would measure as nearly nothing and never trigger a flush.</summary>
-    private static long EstimateBytes(RecordBatch batch) => batch.Arrays.Sum(a => EstimateBytes(a.Data));
-
-    private static long EstimateBytes(ArrayData data)
-    {
-        // Apache.Arrow leaves Buffers/Children null rather than empty on arrays that have neither, so
-        // both are null-checked: an unguarded Sum() throws on every flat column there is.
-        var total = data.Buffers is null ? 0L : data.Buffers.Sum(b => (long)b.Length);
-        if (data.Children is not null)
-        {
-            total += data.Children.Where(c => c is not null).Sum(EstimateBytes);
-        }
-
-        return total;
-    }
+    private static long EstimateBytes(RecordBatch batch) => DeltaTelemetry.PayloadBytes([batch]);
 
     private async Task FlushAsync(SaveMode mode, CancellationToken ct)
     {
@@ -145,7 +132,9 @@ internal sealed class DeltaWriteSession(
 
         try
         {
-            await DeltaBigStack.RunAsync(() => table.InsertAsync(payload, schema, insert, ct)).ConfigureAwait(false);
+            await DeltaTelemetry.RunWriteAsync(
+                    ConnectorStats.Current, DeltaTelemetry.PayloadBytes(payload),
+                    () => table.InsertAsync(payload, schema, insert, ct)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -172,7 +161,8 @@ internal sealed class DeltaWriteSession(
 
         try
         {
-            await DeltaBigStack.RunAsync(() => table.DeleteAsync(ct)).ConfigureAwait(false);
+            await DeltaTelemetry.RunWriteAsync(ConnectorStats.Current, 0, () => table.DeleteAsync(ct))
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -257,7 +247,9 @@ internal sealed class DeltaWriteSession(
         var payload = DeltaMergeDedup.LastWriterWins(this.buffered, options.Keys).ToArray();
         try
         {
-            await DeltaBigStack.RunAsync(() => table.MergeAsync(sql, payload, schema, ct)).ConfigureAwait(false);
+            await DeltaTelemetry.RunWriteAsync(
+                    ConnectorStats.Current, DeltaTelemetry.PayloadBytes(payload),
+                    () => table.MergeAsync(sql, payload, schema, ct)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -351,7 +343,10 @@ internal sealed class DeltaWriteSession(
 
         try
         {
-            await DeltaBigStack.RunAsync(() => table.InsertAsync([empty], schema, insert, ct))
+            // The slice shares its parent's buffers, so its Arrow size is not the metadata-only commit's
+            // payload; the widening reports its request and commit but no bytes.
+            await DeltaTelemetry.RunWriteAsync(
+                    ConnectorStats.Current, 0, () => table.InsertAsync([empty], schema, insert, ct))
                 .ConfigureAwait(false);
         }
         catch (Exception ex)

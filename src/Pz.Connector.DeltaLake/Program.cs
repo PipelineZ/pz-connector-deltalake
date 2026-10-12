@@ -1,4 +1,4 @@
 using Pz.Connector.DeltaLake;
 using Pz.Connectors.Sdk;
 
-return await PzConnectorHost.RunAsync(args, new DeltaLakeConnector()).ConfigureAwait(false);
+return await PzConnectorHost.RunAsync(args, _ => new DeltaLakeConnector()).ConfigureAwait(false);
