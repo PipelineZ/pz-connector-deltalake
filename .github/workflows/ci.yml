@@ -59,4 +59,4 @@ jobs:
       # the preview that introduced it rather than the highest stable.
       - run: scripts/verify-external-connector.sh
         env:
-          PZ_TOOL_VERSION: 0.11.0-preview.4
+          PZ_TOOL_VERSION: 0.11.0
