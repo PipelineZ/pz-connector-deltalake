@@ -26,6 +26,7 @@ internal sealed class DeltaWriteSession(
     public async ValueTask WriteBatchAsync(RecordBatch batch, CancellationToken ct)
     {
         this.ThrowIfTerminated();
+        ct.ThrowIfCancellationRequested();
         RefuseEmptyPartitionValues(batch, tablePartitions, output);
 
         var clone = batch.Clone();
