@@ -49,6 +49,7 @@ internal static class DeltaSecretSql
             case DeltaScheme.Azure:
                 statements.Add("install azure");
                 statements.Add("load azure");
+                statements.AddRange(AzureTransportStatements());
                 if (AzureSecret(config, SecretName(connectionName), root) is { } az)
                 {
                     statements.Add(az);
@@ -151,6 +152,17 @@ internal static class DeltaSecretSql
                    $"connection_string {Literal(connectionStringFromKey)}, scope {Scope(root)})";
         }
 
+        // account_name plus client_id, with no tenant_id or client_secret, picks one user-assigned managed
+        // identity by its client id. A host with more than one user-assigned identity (an Azure Container
+        // Apps job with two, say) cannot use credential_chain: it fails with "Failed to get token from
+        // ChainedTokenCredential", while provider managed_identity with an explicit client_id works.
+        if (!string.IsNullOrEmpty(account) && !string.IsNullOrEmpty(clientId) &&
+            string.IsNullOrEmpty(tenant) && string.IsNullOrEmpty(clientSecret))
+        {
+            return $"create or replace secret {name} (type azure, provider managed_identity, " +
+                   $"account_name {Literal(account)}, client_id {Literal(clientId)}, scope {Scope(root)})";
+        }
+
         // account_name alone, with no key and no service-principal quartet, is the managed-identity /
         // instance-metadata deployment shape. Unlike S3, DuckDB's azure extension has NO ambient
         // credential fallback at all — confirmed against a real DuckDB 1.5.5: a bare az:// read with
@@ -167,6 +179,13 @@ internal static class DeltaSecretSql
 
         return null;
     }
+
+    // On Linux the azure extension's default transport cannot find the system CA bundle: every request
+    // fails with "Problem with the SSL CA cert" before it leaves the host, which surfaces as a credentials
+    // error (seen on Ubuntu 24.04 Container Apps and Arch, DuckDB 1.5.5). The curl transport uses the
+    // system bundle. Azurite never shows this because it is plain http.
+    private static IEnumerable<string> AzureTransportStatements() =>
+        OperatingSystem.IsLinux() ? ["set azure_transport_option_type = 'curl'"] : [];
 
     private static void Add(List<string> parts, string key, string? value)
     {

@@ -19,14 +19,20 @@ namespace Pz.Connector.DeltaLake;
 /// a connector that enables it silently would trade a loud failure for a quiet one.
 ///
 /// The Azure branch mirrors <see cref="DeltaSecretSql.AzureSecret"/>'s strict precedence (connection
-/// string, then the service-principal quartet, then account name + key, then account name alone) one
+/// string, then the service-principal quartet, then account name + key, then account name + client id
+/// as a managed identity, then account name alone) one
 /// mechanism at a time rather than emitting every configured key simultaneously: with a partial config
 /// (e.g. both a connection string AND stray tenant/client fields left over from a previous edit),
 /// DuckDB and delta-rs must pick the SAME mechanism or a read and a schema probe against the same
 /// dataset can authenticate two different ways.</summary>
 internal static class DeltaStorageOptions
 {
-    public static IReadOnlyDictionary<string, string> Build(ConnectorConfig config)
+    public static IReadOnlyDictionary<string, string> Build(ConnectorConfig config) =>
+        Build(config, Environment.GetEnvironmentVariable);
+
+    /// <summary><paramref name="environment"/> is read for one variable only, IDENTITY_ENDPOINT (see
+    /// <see cref="ApplyManagedIdentityEndpoint"/>); tests pass their own lookup.</summary>
+    public static IReadOnlyDictionary<string, string> Build(ConnectorConfig config, Func<string, string?> environment)
     {
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         var root = config.GetString("root") ?? string.Empty;
@@ -38,7 +44,7 @@ internal static class DeltaStorageOptions
                 break;
 
             case DeltaScheme.Azure:
-                ApplyAzureOptions(options, config);
+                ApplyAzureOptions(options, config, environment);
                 break;
 
             case DeltaScheme.Local:
@@ -191,7 +197,8 @@ internal static class DeltaStorageOptions
         options["AWS_CONDITIONAL_PUT"] = "etag";
     }
 
-    private static void ApplyAzureOptions(Dictionary<string, string> options, ConnectorConfig config)
+    private static void ApplyAzureOptions(
+        Dictionary<string, string> options, ConnectorConfig config, Func<string, string?> environment)
     {
         // Precedence 1: a connection string. DuckDB accepts one directly; delta-rs has no equivalent
         // key at all (see the type doc comment), so it is decomposed into the real aliases instead of
@@ -228,10 +235,38 @@ internal static class DeltaStorageOptions
             return;
         }
 
-        // Precedence 4: account name alone (managed identity / ambient credential chain).
+        // Precedence 4: account name + client id alone, a user-assigned managed identity picked by its
+        // client id. With no client secret configured, delta-rs's object store authenticates
+        // AZURE_STORAGE_CLIENT_ID through managed identity.
+        if (!string.IsNullOrEmpty(account) && !string.IsNullOrEmpty(clientId) &&
+            string.IsNullOrEmpty(tenant) && string.IsNullOrEmpty(clientSecret))
+        {
+            options["AZURE_STORAGE_ACCOUNT_NAME"] = account;
+            options["AZURE_STORAGE_CLIENT_ID"] = clientId;
+            ApplyManagedIdentityEndpoint(options, environment);
+            return;
+        }
+
+        // Precedence 5: account name alone (managed identity / ambient credential chain).
         if (!string.IsNullOrEmpty(account))
         {
             options["AZURE_STORAGE_ACCOUNT_NAME"] = account;
+            ApplyManagedIdentityEndpoint(options, environment);
+        }
+    }
+
+    // delta-rs's managed-identity client (object_store's ImdsManagedIdentityProvider) asks the VM
+    // metadata endpoint, 169.254.169.254, for a token unless azure_msi_endpoint says otherwise. Azure
+    // Container Apps and App Service have no such endpoint: they publish their token endpoint in
+    // IDENTITY_ENDPOINT, and the matching IDENTITY_HEADER secret, which object_store already reads from
+    // the environment itself and sends as x-identity-header. Only the endpoint has to be forwarded.
+    // Both key names were confirmed present in the shipped libdelta_rs_bridge.so (object_store 0.13.2).
+    private static void ApplyManagedIdentityEndpoint(
+        Dictionary<string, string> options, Func<string, string?> environment)
+    {
+        if (environment("IDENTITY_ENDPOINT") is { Length: > 0 } endpoint)
+        {
+            options["AZURE_MSI_ENDPOINT"] = endpoint;
         }
     }
 

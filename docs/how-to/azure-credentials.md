@@ -9,7 +9,7 @@ accepted by the connector's root classification and unit-tested there — nothin
 table through one. [../compatibility.md](../compatibility.md) is the full matrix; read it before
 depending on any of this.
 
-## Four mechanisms, tried in order
+## Five mechanisms, tried in order
 
 The connector picks **one** mechanism and gives the same one to both engines. It does not emit every
 configured key at once: with a partial config — a connection string plus stray tenant/client fields
@@ -54,7 +54,25 @@ lake:
   account_key: ${AZURE_STORAGE_KEY}
 ```
 
-### 4. Account name alone
+### 4. A user-assigned managed identity
+
+```yaml
+lake:
+  connector: deltalake
+  root: az://curated/lake
+  account_name: mystorageaccount
+  client_id: ${AZURE_CLIENT_ID}
+```
+
+`client_id` with no `tenant_id` and no `client_secret` picks one user-assigned managed identity by
+its client id. Use this whenever the host has more than one identity: an Azure Container Apps job
+with two user-assigned identities fails the credential chain with `Failed to get token from
+ChainedTokenCredential`, because the chain cannot tell which one you mean.
+
+On Container Apps and App Service the token comes from the endpoint in `IDENTITY_ENDPOINT`, not the
+VM metadata address. The connector forwards it to delta-rs for you; DuckDB finds it on its own.
+
+### 5. Account name alone
 
 ```yaml
 lake:
@@ -63,7 +81,16 @@ lake:
   account_name: mystorageaccount
 ```
 
-Managed identity, or whatever the ambient Azure credential chain resolves.
+Managed identity, or whatever the ambient Azure credential chain resolves. With several identities on
+the host, use mechanism 4 instead.
+
+## Linux hosts
+
+DuckDB's azure extension, by default, cannot find the system CA bundle on Linux (seen on Ubuntu 24.04
+Container Apps and Arch): every request fails before it leaves the host, and the error reads like a
+credentials problem (`Fail to get a new connection for: https://<account>.blob.core.windows.net`). On
+Linux the connector therefore sets `azure_transport_option_type = 'curl'`, which uses the system
+bundle. Azurite never shows the problem, because it is plain http.
 
 ## Plain http endpoints
 

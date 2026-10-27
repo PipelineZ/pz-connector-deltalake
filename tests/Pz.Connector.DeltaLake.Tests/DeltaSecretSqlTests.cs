@@ -255,6 +255,57 @@ public class DeltaSecretSqlTests
     }
 
     [Fact]
+    public void An_azure_root_with_account_name_and_client_id_uses_the_managed_identity_provider()
+    {
+        // A host with several user-assigned identities cannot use credential_chain ("Failed to get token
+        // from ChainedTokenCredential"); provider managed_identity with an explicit client_id picks one.
+        var stmts = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("client_id", "cid")), "lake");
+
+        var name = DeltaSecretSql.SecretName("lake");
+        Assert.Equal(
+            $"create or replace secret {name} (type azure, provider managed_identity, " +
+            "account_name 'myacct', client_id 'cid', scope 'az://fs/d/')",
+            SoleSecret(stmts));
+    }
+
+    [Fact]
+    public void A_client_id_with_a_partial_service_principal_does_not_become_a_managed_identity()
+    {
+        var sql = SoleSecret(DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("client_id", "cid"), ("tenant_id", "T")),
+            "lake"));
+
+        Assert.DoesNotContain("managed_identity", sql);
+    }
+
+    [Fact]
+    public void An_azure_root_uses_the_curl_transport_on_linux_only()
+    {
+        var stmts = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("connection_string", "CS")), "lake");
+
+        const string curl = "set azure_transport_option_type = 'curl'";
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.True(stmts.ToList().IndexOf(curl) > stmts.ToList().IndexOf("load azure"), "transport must follow the extension load");
+        }
+        else
+        {
+            Assert.DoesNotContain(curl, stmts);
+        }
+    }
+
+    [Fact]
+    public void Non_azure_roots_never_set_the_azure_transport()
+    {
+        Assert.DoesNotContain(DeltaSecretSql.SetupStatements(Cfg(("root", "s3://w/d")), "lake"),
+            s => s.Contains("azure_transport_option_type", StringComparison.Ordinal));
+        Assert.DoesNotContain(DeltaSecretSql.SetupStatements(Cfg(("root", "/mnt/lake")), "lake"),
+            s => s.Contains("azure_transport_option_type", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Secret_names_are_deterministic_and_do_not_collide_across_similar_connection_names()
     {
         Assert.Equal(DeltaSecretSql.SecretName("prod-db"), DeltaSecretSql.SecretName("prod-db"));
