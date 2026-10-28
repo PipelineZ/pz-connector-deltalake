@@ -31,7 +31,7 @@ reaches a planner reason string, `plan.json`, a run event, or a message.
 | `account_key` | string | unset | Azure only. A shared key for that account. |
 | `connection_string` | string | unset | Azure only. A standard Azure Storage connection string. delta-rs has no storage-option key for one, so the connector decomposes it into the keys delta-rs does read (`AccountName`, `AccountKey`, `SharedAccessSignature`, `BlobEndpoint`); DuckDB takes it whole. |
 | `tenant_id` | string | unset | Azure only. Part of the service-principal quartet, with `account_name`, `client_id` and `client_secret`. |
-| `client_id` | string | unset | Azure only. See `tenant_id`. |
+| `client_id` | string | unset | Azure only. See `tenant_id`. With `account_name` and no `tenant_id` or `client_secret`, it selects a user-assigned managed identity instead. |
 | `client_secret` | string | unset | Azure only. See `tenant_id`. |
 
 An option that belongs to the other family is refused with **PZDL0102** — `region:` under an `az://`
@@ -58,14 +58,20 @@ lake:
 
 ## How credentials are chosen on Azure
 
-Four mechanisms, tried strictly in this order, one at a time. Both engines are given the *same*
+Five mechanisms, tried strictly in this order, one at a time. Both engines are given the *same*
 mechanism rather than every configured key at once — otherwise a leftover field from an earlier edit
 could have a read and a schema probe of the same table authenticate two different ways.
 
 1. `connection_string`
 2. `account_name` + `tenant_id` + `client_id` + `client_secret` (service principal)
 3. `account_name` + `account_key`
-4. `account_name` alone — managed identity or the ambient Azure credential chain
+4. `account_name` + `client_id`, with no `tenant_id` or `client_secret`: the user-assigned managed
+   identity with that client id
+5. `account_name` alone: managed identity or the ambient Azure credential chain
+
+On Linux, every Azure connection also switches DuckDB's azure extension to its curl transport,
+because the default transport cannot find the system CA bundle there and fails every request over
+TLS.
 
 ## How credentials are chosen on S3
 

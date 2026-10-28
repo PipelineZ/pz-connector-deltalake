@@ -106,6 +106,43 @@ public class SchemaTests
     }
 
     [Fact]
+    public void Azure_account_name_and_client_id_alone_select_a_managed_identity()
+    {
+        var opts = DeltaStorageOptions.Build(Cfg(
+            ("root", "az://fs/d"), ("account_name", "acct"), ("client_id", "cid")), _ => null);
+
+        Assert.Equal("acct", opts["AZURE_STORAGE_ACCOUNT_NAME"]);
+        Assert.Equal("cid", opts["AZURE_STORAGE_CLIENT_ID"]);
+        Assert.False(opts.ContainsKey("AZURE_STORAGE_CLIENT_SECRET"));
+        Assert.False(opts.ContainsKey("AZURE_STORAGE_TENANT_ID"));
+    }
+
+    [Theory]
+    [InlineData("cid")]
+    [InlineData(null)]
+    public void Azure_managed_identity_forwards_the_container_apps_identity_endpoint(string? clientId)
+    {
+        var cfg = clientId is null
+            ? Cfg(("root", "az://fs/d"), ("account_name", "acct"))
+            : Cfg(("root", "az://fs/d"), ("account_name", "acct"), ("client_id", clientId));
+
+        var opts = DeltaStorageOptions.Build(cfg,
+            name => name == "IDENTITY_ENDPOINT" ? "http://localhost:42356/msi/token" : null);
+
+        Assert.Equal("http://localhost:42356/msi/token", opts["AZURE_MSI_ENDPOINT"]);
+    }
+
+    [Fact]
+    public void Azure_key_auth_never_forwards_the_identity_endpoint()
+    {
+        var opts = DeltaStorageOptions.Build(
+            Cfg(("root", "az://fs/d"), ("account_name", "acct"), ("account_key", "KEY")),
+            _ => "http://localhost:42356/msi/token");
+
+        Assert.False(opts.ContainsKey("AZURE_MSI_ENDPOINT"));
+    }
+
+    [Fact]
     public void Azure_service_principal_takes_precedence_over_account_key_when_both_are_given()
     {
         // Mirrors DeltaSecretSql.AzureSecret's precedence: DuckDB and delta-rs must pick the same
