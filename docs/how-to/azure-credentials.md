@@ -65,6 +65,13 @@ lake:
 
 Managed identity, or whatever the ambient Azure credential chain resolves.
 
+Where that identity is announced through environment variables (Container Apps and App Service set
+`IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, AKS workload identity sets `AZURE_FEDERATED_TOKEN_FILE`, a
+service principal sets `AZURE_CLIENT_SECRET`), the connector process only sees them with pz 0.14.0 or
+newer: pz starts external connectors with a cleared environment and forwards the Azure identity
+variables to this package because it declares them. An Azure VM's metadata endpoint needs no variable
+and works with any pz.
+
 ## Plain http endpoints
 
 The object-store client refuses a plain-http endpoint unless told to allow one, and the refusal names
