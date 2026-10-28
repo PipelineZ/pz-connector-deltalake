@@ -43,6 +43,11 @@ internal static class DeltaErrors
     public const string TableUnreadable = "PZDL0201";
     public const string VersionNotFound = "PZDL0202";
 
+    /// <summary>No Azure storage token could be had for an identity read (a client id, or an account name
+    /// alone): the connector fetches it itself because DuckDB's delta extension passes no managed identity
+    /// credentials to delta-kernel (<see cref="DeltaAzureToken"/>).</summary>
+    public const string AzureTokenUnavailable = "PZDL0203";
+
     // Write, pre-flight.
     public const string SchemaMismatch = "PZDL0301";
     public const string UnwritableArrowType = "PZDL0302";
@@ -115,7 +120,7 @@ internal static class DeltaErrors
     public static readonly IReadOnlyList<string> AllCodes =
     [
         UnsupportedRoot, SchemeOptionMismatch, MergeWithoutKeys, VersionOnWrite,
-        InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound,
+        InvalidMergePredicate, InvalidWriteOption, TableUnreadable, VersionNotFound, AzureTokenUnavailable,
         SchemaMismatch,
         UnwritableArrowType, MergeKeyNotInSchema, UnquotableColumnName, UnresolvableMergeKeyType,
         CommitConflict, DuplicateMergeKeys,

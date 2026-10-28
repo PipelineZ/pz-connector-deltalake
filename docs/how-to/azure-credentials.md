@@ -73,6 +73,11 @@ On Container Apps and App Service the token comes from the endpoint in `IDENTITY
 VM metadata address. The connector forwards it to delta-rs for you and DuckDB finds it on its own,
 as long as the variable reaches the connector (pz 0.14.0 or newer, see below).
 
+For the read, the connector fetches a storage token for that identity itself and gives DuckDB an
+`access_token` secret: DuckDB's delta extension passes delta-kernel no credentials for a managed
+identity secret, so a read with DuckDB's own `managed_identity` provider goes out unauthenticated
+(`401 NoAuthenticationInformation`). A failed fetch is PZDL0203.
+
 ### 5. Account name alone
 
 ```yaml
@@ -82,8 +87,13 @@ lake:
   account_name: mystorageaccount
 ```
 
-Managed identity, or whatever the ambient Azure credential chain resolves. With several identities on
-the host, use mechanism 4 instead.
+Managed identity, or whatever the ambient Azure credential chain resolves, in `DefaultAzureCredential`'s
+order: an environment service principal (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`),
+workload identity (`AZURE_FEDERATED_TOKEN_FILE`), the managed identity `AZURE_CLIENT_ID` names, then a
+developer sign-in such as `az login`. The read gets its token from that chain and the write runs as
+the same identity. With several identities on the host and no `AZURE_CLIENT_ID`, the platform cannot
+tell which one you mean (`Unable to load the proper Managed Identity.`): set `AZURE_CLIENT_ID` or use
+mechanism 4.
 
 Where that identity is announced through environment variables (Container Apps and App Service set
 `IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, AKS workload identity sets `AZURE_FEDERATED_TOKEN_FILE`, a

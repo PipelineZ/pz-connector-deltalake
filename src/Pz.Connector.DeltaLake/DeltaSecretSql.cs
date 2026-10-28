@@ -29,7 +29,14 @@ internal static class DeltaSecretSql
     public static string SecretName(string connectionName) =>
         $"pz_delta_{Sanitize(connectionName)}_{HashSuffix(connectionName)}";
 
-    public static IReadOnlyList<string> SetupStatements(ConnectorConfig config, string connectionName)
+    public static IReadOnlyList<string> SetupStatements(ConnectorConfig config, string connectionName) =>
+        SetupStatements(config, connectionName, DeltaAzureToken.Fetch);
+
+    /// <summary><paramref name="storageToken"/> returns an Azure storage access token for a client id (or
+    /// null for the default chain); it is called only for the two identity shapes, and tests pass their
+    /// own.</summary>
+    public static IReadOnlyList<string> SetupStatements(
+        ConnectorConfig config, string connectionName, Func<string?, string> storageToken)
     {
         var root = config.GetString("root") ?? string.Empty;
         var statements = new List<string> { "install delta", "load delta" };
@@ -50,7 +57,7 @@ internal static class DeltaSecretSql
                 statements.Add("install azure");
                 statements.Add("load azure");
                 statements.AddRange(AzureTransportStatements());
-                if (AzureSecret(config, SecretName(connectionName), root) is { } az)
+                if (AzureSecret(config, SecretName(connectionName), root, storageToken) is { } az)
                 {
                     statements.Add(az);
                 }
@@ -114,7 +121,8 @@ internal static class DeltaSecretSql
         return $"create or replace secret {name} ({string.Join(", ", parts)})";
     }
 
-    private static string? AzureSecret(ConnectorConfig config, string name, string root)
+    private static string? AzureSecret(
+        ConnectorConfig config, string name, string root, Func<string?, string> storageToken)
     {
         var connectionString = config.GetString("connection_string");
         if (!string.IsNullOrEmpty(connectionString))
@@ -153,28 +161,21 @@ internal static class DeltaSecretSql
         }
 
         // account_name plus client_id, with no tenant_id or client_secret, picks one user-assigned managed
-        // identity by its client id. A host with more than one user-assigned identity (an Azure Container
-        // Apps job with two, say) cannot use credential_chain: it fails with "Failed to get token from
-        // ChainedTokenCredential", while provider managed_identity with an explicit client_id works.
-        if (!string.IsNullOrEmpty(account) && !string.IsNullOrEmpty(clientId) &&
-            string.IsNullOrEmpty(tenant) && string.IsNullOrEmpty(clientSecret))
-        {
-            return $"create or replace secret {name} (type azure, provider managed_identity, " +
-                   $"account_name {Literal(account)}, client_id {Literal(clientId)}, scope {Scope(root)})";
-        }
-
-        // account_name alone, with no key and no service-principal quartet, is the managed-identity /
-        // instance-metadata deployment shape. Unlike S3, DuckDB's azure extension has NO ambient
-        // credential fallback at all — confirmed against a real DuckDB 1.5.5: a bare az:// read with
-        // no secret configured (even with AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT set
-        // in the environment) fails outright with "Invalid Input Error: No valid Azure credentials
-        // found!". A secret is mandatory for every az:// read, so account_name alone must still
-        // produce one: "type azure, provider credential_chain, account_name '<account>'" is the shape
-        // DuckDB documents for managed identity, and account_name is that provider's one parameter.
+        // identity by its client id; account_name alone is the default chain (managed identity, workload
+        // identity, an environment service principal, or a developer sign-in). Neither can be handed to
+        // DuckDB as a managed_identity or credential_chain secret: the delta extension gives delta-kernel no
+        // credentials for the first and the VM metadata endpoint with no client id for the second, so a
+        // Container Apps read fails either way (see DeltaAzureToken). The connector gets the token and
+        // gives DuckDB an access_token secret, which delta-kernel and the azure extension both use.
         if (!string.IsNullOrEmpty(account))
         {
-            return $"create or replace secret {name} (type azure, provider credential_chain, " +
-                   $"account_name {Literal(account)}, scope {Scope(root)})";
+            var selected = !string.IsNullOrEmpty(clientId) && string.IsNullOrEmpty(tenant) &&
+                           string.IsNullOrEmpty(clientSecret)
+                ? clientId
+                : null;
+            return $"create or replace secret {name} (type azure, provider access_token, " +
+                   $"access_token {Literal(storageToken(selected))}, account_name {Literal(account)}, " +
+                   $"scope {Scope(root)})";
         }
 
         return null;

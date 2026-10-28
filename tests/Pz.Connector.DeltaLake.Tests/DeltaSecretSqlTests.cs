@@ -235,48 +235,79 @@ public class DeltaSecretSqlTests
         Assert.Contains("it''s''a''key", sql);
     }
 
-    [Fact]
-    public void An_azure_root_with_only_account_name_uses_the_credential_chain_provider()
+    // The connector fetches the storage token itself for the two identity shapes (DeltaAzureToken): DuckDB's
+    // delta extension passes delta-kernel no credentials for a managed_identity secret and the VM metadata
+    // endpoint for credential_chain, while an access_token secret reaches both delta-kernel and the azure
+    // extension. These record which identity was asked for instead of reaching Azure.
+    private static Func<string?, string> FakeToken(List<string?> asked) => clientId =>
     {
-        // DuckDB's azure extension has NO ambient credential fallback the way S3 has AWS_* — confirmed
-        // against a real DuckDB 1.5.5: a bare az:// read with no secret configured fails outright
-        // ("Invalid Input Error: No valid Azure credentials found!"), even with
-        // AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT set in the environment. A secret is
-        // therefore mandatory for every az:// read; account_name alone is the managed-identity shape,
-        // and "provider credential_chain, account_name '<account>'" is what DuckDB documents for it
-        // (confirmed: this exact shape succeeds against a real DuckDB 1.5.5).
-        var stmts = DeltaSecretSql.SetupStatements(Cfg(("root", "az://fs/d"), ("account_name", "myacct")), "lake");
-
-        var name = DeltaSecretSql.SecretName("lake");
-        Assert.Equal(
-            $"create or replace secret {name} (type azure, provider credential_chain, " +
-            "account_name 'myacct', scope 'az://fs/d/')",
-            SoleSecret(stmts));
-    }
+        asked.Add(clientId);
+        return clientId is null ? "default-token" : $"token-for-{clientId}";
+    };
 
     [Fact]
-    public void An_azure_root_with_account_name_and_client_id_uses_the_managed_identity_provider()
+    public void An_azure_root_with_only_account_name_gets_a_default_chain_token_as_an_access_token_secret()
     {
-        // A host with several user-assigned identities cannot use credential_chain ("Failed to get token
-        // from ChainedTokenCredential"); provider managed_identity with an explicit client_id picks one.
+        var asked = new List<string?>();
         var stmts = DeltaSecretSql.SetupStatements(
-            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("client_id", "cid")), "lake");
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct")), "lake", FakeToken(asked));
 
         var name = DeltaSecretSql.SecretName("lake");
         Assert.Equal(
-            $"create or replace secret {name} (type azure, provider managed_identity, " +
-            "account_name 'myacct', client_id 'cid', scope 'az://fs/d/')",
+            $"create or replace secret {name} (type azure, provider access_token, " +
+            "access_token 'default-token', account_name 'myacct', scope 'az://fs/d/')",
             SoleSecret(stmts));
+        Assert.Equal([null], asked);
     }
 
     [Fact]
-    public void A_client_id_with_a_partial_service_principal_does_not_become_a_managed_identity()
+    public void An_azure_root_with_account_name_and_client_id_gets_that_identitys_token()
     {
+        // A host with several user-assigned identities has to name one: the client id selects the
+        // managed identity the token is fetched for.
+        var asked = new List<string?>();
+        var stmts = DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("client_id", "cid")), "lake", FakeToken(asked));
+
+        var name = DeltaSecretSql.SecretName("lake");
+        Assert.Equal(
+            $"create or replace secret {name} (type azure, provider access_token, " +
+            "access_token 'token-for-cid', account_name 'myacct', scope 'az://fs/d/')",
+            SoleSecret(stmts));
+        Assert.Equal(["cid"], asked);
+    }
+
+    [Fact]
+    public void A_client_id_with_a_partial_service_principal_does_not_select_a_managed_identity()
+    {
+        var asked = new List<string?>();
         var sql = SoleSecret(DeltaSecretSql.SetupStatements(
             Cfg(("root", "az://fs/d"), ("account_name", "myacct"), ("client_id", "cid"), ("tenant_id", "T")),
-            "lake"));
+            "lake", FakeToken(asked)));
 
-        Assert.DoesNotContain("managed_identity", sql);
+        Assert.Contains("access_token 'default-token'", sql);
+        Assert.Equal([null], asked);
+    }
+
+    [Theory]
+    [InlineData("connection_string", "CS")]
+    [InlineData("account_key", "bXlrZXk=")]
+    public void Key_based_azure_roots_never_fetch_a_token(string key, string value)
+    {
+        var asked = new List<string?>();
+        DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct"), (key, value)), "lake", FakeToken(asked));
+
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void Single_quotes_in_a_fetched_token_are_escaped_rather_than_ending_the_literal()
+    {
+        var sql = SoleSecret(DeltaSecretSql.SetupStatements(
+            Cfg(("root", "az://fs/d"), ("account_name", "myacct")), "lake", _ => "it's"));
+
+        Assert.Contains("access_token 'it''s'", sql);
     }
 
     [Fact]

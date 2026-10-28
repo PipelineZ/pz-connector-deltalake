@@ -142,6 +142,67 @@ public class SchemaTests
         Assert.False(opts.ContainsKey("AZURE_MSI_ENDPOINT"));
     }
 
+    // An account-name-only root runs as whatever the forwarded environment names, in DefaultAzureCredential's
+    // order, because object_store reads only the options it is given.
+    private static Func<string, string?> Env(params (string Name, string Value)[] vars) =>
+        name => vars.FirstOrDefault(v => v.Name == name).Value;
+
+    [Fact]
+    public void Azure_account_name_alone_runs_as_the_managed_identity_azure_client_id_names()
+    {
+        var opts = DeltaStorageOptions.Build(Cfg(("root", "az://fs/d"), ("account_name", "acct")),
+            Env(("AZURE_CLIENT_ID", "env-cid")));
+
+        Assert.Equal("env-cid", opts["AZURE_STORAGE_CLIENT_ID"]);
+        Assert.False(opts.ContainsKey("AZURE_STORAGE_CLIENT_SECRET"));
+        Assert.False(opts.ContainsKey("AZURE_FEDERATED_TOKEN_FILE"));
+    }
+
+    [Fact]
+    public void Azure_account_name_alone_takes_an_environment_service_principal_first()
+    {
+        var opts = DeltaStorageOptions.Build(Cfg(("root", "az://fs/d"), ("account_name", "acct")),
+            Env(("AZURE_CLIENT_ID", "sp"), ("AZURE_TENANT_ID", "t"), ("AZURE_CLIENT_SECRET", "s"),
+                ("AZURE_FEDERATED_TOKEN_FILE", "/var/run/token"), ("AZURE_AUTHORITY_HOST", "https://login.example/")));
+
+        Assert.Equal("sp", opts["AZURE_STORAGE_CLIENT_ID"]);
+        Assert.Equal("t", opts["AZURE_STORAGE_TENANT_ID"]);
+        Assert.Equal("s", opts["AZURE_STORAGE_CLIENT_SECRET"]);
+        Assert.Equal("https://login.example/", opts["AZURE_STORAGE_AUTHORITY_HOST"]);
+        Assert.False(opts.ContainsKey("AZURE_FEDERATED_TOKEN_FILE"));
+    }
+
+    [Fact]
+    public void Azure_account_name_alone_takes_workload_identity_when_there_is_no_secret()
+    {
+        var opts = DeltaStorageOptions.Build(Cfg(("root", "az://fs/d"), ("account_name", "acct")),
+            Env(("AZURE_CLIENT_ID", "wi"), ("AZURE_TENANT_ID", "t"), ("AZURE_FEDERATED_TOKEN_FILE", "/var/run/token")));
+
+        Assert.Equal("wi", opts["AZURE_STORAGE_CLIENT_ID"]);
+        Assert.Equal("t", opts["AZURE_STORAGE_TENANT_ID"]);
+        Assert.Equal("/var/run/token", opts["AZURE_FEDERATED_TOKEN_FILE"]);
+        Assert.False(opts.ContainsKey("AZURE_STORAGE_CLIENT_SECRET"));
+    }
+
+    [Fact]
+    public void Azure_account_name_alone_with_no_identity_variables_stays_system_assigned()
+    {
+        var opts = DeltaStorageOptions.Build(Cfg(("root", "az://fs/d"), ("account_name", "acct")), _ => null);
+
+        Assert.Equal("acct", opts["AZURE_STORAGE_ACCOUNT_NAME"]);
+        Assert.False(opts.ContainsKey("AZURE_STORAGE_CLIENT_ID"));
+    }
+
+    [Fact]
+    public void A_configured_client_id_wins_over_azure_client_id_in_the_environment()
+    {
+        var opts = DeltaStorageOptions.Build(
+            Cfg(("root", "az://fs/d"), ("account_name", "acct"), ("client_id", "cfg-cid")),
+            Env(("AZURE_CLIENT_ID", "env-cid")));
+
+        Assert.Equal("cfg-cid", opts["AZURE_STORAGE_CLIENT_ID"]);
+    }
+
     [Fact]
     public void Azure_service_principal_takes_precedence_over_account_key_when_both_are_given()
     {
