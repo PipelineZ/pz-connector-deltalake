@@ -55,8 +55,8 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      # The write-stats check needs a pz that carries the remote-stats contract, so the tool is pinned to
-      # the preview that introduced it rather than the highest stable.
+      # Pinned to the pz that forwards declared ambient identity (0.14.0), which also carries the
+      # remote-stats contract the write-stats check needs.
       - run: scripts/verify-external-connector.sh
         env:
-          PZ_TOOL_VERSION: 0.11.0
+          PZ_TOOL_VERSION: 0.14.0
