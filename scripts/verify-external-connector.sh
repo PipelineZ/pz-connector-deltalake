@@ -93,6 +93,9 @@ grep -q "\"${RID}\": \"native/Pz.Connector.DeltaLake\"" <<<"${MANIFEST}" || {
 grep -q '"NativeScan"' <<<"${MANIFEST}" || { echo "FAIL: manifest does not declare NativeScan" >&2; exit 1; }
 # root: stays absolute (PZDL0101); a manifest that anchored the project directory would change that.
 ! grep -q 'projectDirectoryAnchor' <<<"${MANIFEST}" || { echo "FAIL: manifest declares a project-directory anchor" >&2; exit 1; }
+# delta-rs resolves Azure and S3 identity in this process, so pz must forward both clouds' variables.
+tr -d ' \n' <<<"${MANIFEST}" | grep -q '"ambientIdentity":\["aws","azure"\]' || {
+  echo "FAIL: manifest does not declare ambientIdentity aws, azure" >&2; echo "${MANIFEST}" >&2; exit 1; }
 
 echo "-- Writing a NuGet.Config listing the local feed FIRST, then nuget.org --"
 # PZ_TOOL_FEED points the whole chain at a pz built from source rather than the released tool. It is

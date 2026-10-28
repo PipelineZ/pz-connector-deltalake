@@ -21,8 +21,13 @@ Add `session_token:` for temporary credentials.
 
 ## The ambient credential chain
 
-Leave both out and the ambient chain is used: an instance profile, an IRSA/web-identity token, the
-`AWS_*` environment. DuckDB is given `provider credential_chain`, delta-rs resolves its own — and any
+Leave both out and the ambient chain is used: an instance profile, an IRSA/web-identity token, an
+ECS or EKS Pod Identity task role. pz starts external connectors with a cleared environment; from pz
+0.14.0 it forwards the AWS identity variables this package declares (`AWS_WEB_IDENTITY_TOKEN_FILE`,
+`AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*`, `AWS_REGION`, ...), so IRSA and ECS need pz 0.14.0 or
+newer. Static keys in the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and
+`AWS_PROFILE` are not forwarded: pass keys as `access_key_id: ${AWS_ACCESS_KEY_ID}` and
+`secret_access_key: ${AWS_SECRET_ACCESS_KEY}`. DuckDB is given `provider credential_chain`, delta-rs resolves its own, and any
 `endpoint`, `region`, `url_style`, `use_ssl` or `session_token` you configured still reaches both.
 
 ```yaml
