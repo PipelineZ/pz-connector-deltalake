@@ -30,8 +30,9 @@ internal static class DeltaStorageOptions
     public static IReadOnlyDictionary<string, string> Build(ConnectorConfig config) =>
         Build(config, Environment.GetEnvironmentVariable);
 
-    /// <summary><paramref name="environment"/> is read for one variable only, IDENTITY_ENDPOINT (see
-    /// <see cref="ApplyManagedIdentityEndpoint"/>); tests pass their own lookup.</summary>
+    /// <summary><paramref name="environment"/> is read only for the Azure identity variables pz 0.14+
+    /// forwards (see <see cref="ApplyAmbientIdentity"/> and <see cref="ApplyManagedIdentityEndpoint"/>);
+    /// tests pass their own lookup.</summary>
     public static IReadOnlyDictionary<string, string> Build(ConnectorConfig config, Func<string, string?> environment)
     {
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -251,7 +252,54 @@ internal static class DeltaStorageOptions
         if (!string.IsNullOrEmpty(account))
         {
             options["AZURE_STORAGE_ACCOUNT_NAME"] = account;
+            ApplyAmbientIdentity(options, environment);
             ApplyManagedIdentityEndpoint(options, environment);
+        }
+    }
+
+    // object_store builds its credential from the options it is given, not from the AZURE_* environment, so
+    // the identity an account-name-only root runs as has to be spelled out for delta-rs. Same order as
+    // DefaultAzureCredential, which gives the DuckDB half its token (DeltaAzureToken): an environment
+    // service principal, then workload identity, then a managed identity named by AZURE_CLIENT_ID. Without
+    // the client id a host with several user-assigned identities is refused by its own token endpoint
+    // ("Unable to load the proper Managed Identity.", measured on Azure Container Apps). Nothing set means
+    // the system-assigned identity, as before. All of these reach this process only from pz 0.14.0, which
+    // forwards them because the package declares the azure group.
+    private static void ApplyAmbientIdentity(Dictionary<string, string> options, Func<string, string?> environment)
+    {
+        var clientId = environment("AZURE_CLIENT_ID");
+        if (string.IsNullOrEmpty(clientId))
+        {
+            return;
+        }
+
+        var tenant = environment("AZURE_TENANT_ID");
+        if (!string.IsNullOrEmpty(tenant) && environment("AZURE_CLIENT_SECRET") is { Length: > 0 } secret)
+        {
+            options["AZURE_STORAGE_TENANT_ID"] = tenant;
+            options["AZURE_STORAGE_CLIENT_ID"] = clientId;
+            options["AZURE_STORAGE_CLIENT_SECRET"] = secret;
+            ApplyAuthorityHost(options, environment);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(tenant) && environment("AZURE_FEDERATED_TOKEN_FILE") is { Length: > 0 } tokenFile)
+        {
+            options["AZURE_STORAGE_TENANT_ID"] = tenant;
+            options["AZURE_STORAGE_CLIENT_ID"] = clientId;
+            options["AZURE_FEDERATED_TOKEN_FILE"] = tokenFile;
+            ApplyAuthorityHost(options, environment);
+            return;
+        }
+
+        options["AZURE_STORAGE_CLIENT_ID"] = clientId;
+    }
+
+    private static void ApplyAuthorityHost(Dictionary<string, string> options, Func<string, string?> environment)
+    {
+        if (environment("AZURE_AUTHORITY_HOST") is { Length: > 0 } authority)
+        {
+            options["AZURE_STORAGE_AUTHORITY_HOST"] = authority;
         }
     }
 

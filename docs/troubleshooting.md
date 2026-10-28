@@ -128,6 +128,21 @@ log. The wrapped message names the location and the storage-layer error.
 **Fix.** A non-negative integer. A version that is well-formed but simply absent from the log is not
 caught here — it surfaces as PZDL0201 when the table is opened.
 
+### `PZDL0203`: no Azure storage token for an identity read
+
+**Symptom.** "no Azure storage token from the user-assigned managed identity with client id '...'" or
+"... from the default Azure credential chain", raised when the read is planned.
+
+**Cause.** An `az://` root with a client id, or with an account name alone, reads through a storage
+token the connector fetches itself, because DuckDB's delta extension gives delta-kernel no credentials
+for a managed identity secret. The fetch failed: the host has no such identity, the identity variables
+did not reach the connector, or (account name alone) nothing in the default chain signed in.
+
+**Fix.** Check the client id against the identities attached to the host. On Container Apps, App
+Service and AKS workload identity, use pz 0.14.0 or newer, which forwards the identity variables to this
+connector; `pz restore` prints `receives host identity: aws, azure` for it. On a developer machine,
+`az login` satisfies the default chain.
+
 ## Writing, before anything is written
 
 ### `PZDL0301`: the schema, or the partitioning, does not match the table
