@@ -70,7 +70,8 @@ with two user-assigned identities fails the credential chain with `Failed to get
 ChainedTokenCredential`, because the chain cannot tell which one you mean.
 
 On Container Apps and App Service the token comes from the endpoint in `IDENTITY_ENDPOINT`, not the
-VM metadata address. The connector forwards it to delta-rs for you; DuckDB finds it on its own.
+VM metadata address. The connector forwards it to delta-rs for you and DuckDB finds it on its own,
+as long as the variable reaches the connector (pz 0.14.0 or newer, see below).
 
 ### 5. Account name alone
 
@@ -84,6 +85,13 @@ lake:
 Managed identity, or whatever the ambient Azure credential chain resolves. With several identities on
 the host, use mechanism 4 instead.
 
+Where that identity is announced through environment variables (Container Apps and App Service set
+`IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, AKS workload identity sets `AZURE_FEDERATED_TOKEN_FILE`, a
+service principal sets `AZURE_CLIENT_SECRET`), the connector process only sees them with pz 0.14.0 or
+newer: pz starts external connectors with a cleared environment and forwards the Azure identity
+variables to this package because it declares them. An Azure VM's metadata endpoint needs no variable
+and works with any pz.
+
 ## Linux hosts
 
 DuckDB's azure extension, by default, cannot find the system CA bundle on Linux (seen on Ubuntu 24.04
@@ -91,13 +99,6 @@ Container Apps and Arch): every request fails before it leaves the host, and the
 credentials problem (`Fail to get a new connection for: https://<account>.blob.core.windows.net`). On
 Linux the connector therefore sets `azure_transport_option_type = 'curl'`, which uses the system
 bundle. Azurite never shows the problem, because it is plain http.
-
-Where that identity is announced through environment variables (Container Apps and App Service set
-`IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, AKS workload identity sets `AZURE_FEDERATED_TOKEN_FILE`, a
-service principal sets `AZURE_CLIENT_SECRET`), the connector process only sees them with pz 0.14.0 or
-newer: pz starts external connectors with a cleared environment and forwards the Azure identity
-variables to this package because it declares them. An Azure VM's metadata endpoint needs no variable
-and works with any pz.
 
 ## Plain http endpoints
 
