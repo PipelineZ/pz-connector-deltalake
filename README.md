@@ -10,8 +10,8 @@ Reads through DuckDB's `delta` extension, so rows never enter .NET. Writes — `
 **1. It requires pz 0.5.1 or newer, and runs in its own process.** pz spawns the Native AOT
 connector binary the package ships for your platform and talks to it over the connector process
 protocol (PCP); nothing from this package is loaded into pz itself. The connector is written against
-`Pz.Connectors.Abstractions` 0.14.0 and served by `Pz.Connectors.Sdk` 0.14.0. Verified on linux-x64
-against pz 0.14.0: `scripts/verify-external-connector.sh` restores, runs both directions, retries,
+`Pz.Connectors.Abstractions` 0.19.0 and served by `Pz.Connectors.Sdk` 0.19.0. Verified on linux-x64
+against pz 0.19.0: `scripts/verify-external-connector.sh` restores, runs both directions, retries,
 and passes the PCP conformance vectors end to end. Ambient cloud identity (an `account_name` alone
 on Azure, S3 with no keys) needs **pz 0.14.0 or newer** wherever the identity lives in environment
 variables (Container Apps, App Service, AKS workload identity, IRSA, ECS): pz starts the connector
