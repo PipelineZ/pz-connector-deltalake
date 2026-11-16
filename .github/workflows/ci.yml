@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0 # MinVer reads tag history; a shallow clone versions everything 0.0.0-alpha.0.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
       # Ubuntu only, and that is a coverage statement, not a convenience. The object-store suites are
       # Testcontainers over MinIO and Azurite -- Linux images a Windows runner cannot pull -- and
@@ -54,7 +54,7 @@ jobs:
           fetch-depth: 0 # the script packs, and MinVer needs the history to version what it packs.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       # Pinned to the pz that forwards declared ambient identity (0.14.0), which also carries the
       # remote-stats contract the write-stats check needs.
       - run: scripts/verify-external-connector.sh

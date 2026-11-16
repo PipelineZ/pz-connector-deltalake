@@ -212,7 +212,7 @@ wire are not visible, so `wireBytes` is the Arrow payload, not network traffic.
 
 ## Building it
 
-Requires the .NET 10 SDK. Docker is optional — the object-store suites skip cleanly without it.
+Requires the .NET 11 SDK. Docker is optional — the object-store suites skip cleanly without it.
 
 ```bash
 dotnet build Pz.Connector.DeltaLake.slnx -c Release    # zero warnings required

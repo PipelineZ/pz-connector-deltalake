@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0 # MinVer computes the release version from this tag plus history.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet cache:
       # the restore folded into `publish -r` alone does not pull the RID-specific packs this build
       # needs (NETSDK1112), even though the same restore run standalone does.
@@ -71,7 +71,7 @@ jobs:
           fetch-depth: 0 # MinVer computes the release version from this tag plus history.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - run: dotnet build Pz.Connector.DeltaLake.slnx -c Release
       # PZ_TESTS_OFFLINE=1 here, where ci.yml deliberately does NOT set it. Releasing is not the
       # moment to depend on network reachability: a nuget.org blip or a failed DuckDB extension
