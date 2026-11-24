@@ -23,7 +23,8 @@ public sealed class DeltaLakeConnector : ISourceConnector, ISinkConnector, INati
         ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow |
         ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.Merge |
         ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
-        ConnectorCapabilities.ColumnPartitionedWrites | ConnectorCapabilities.ReportsStats;
+        ConnectorCapabilities.ColumnPartitionedWrites | ConnectorCapabilities.ReportsStats |
+        ConnectorCapabilities.NestedTypes;
 
     public string ConnectionConfigSchema => DeltaLakeSchemas.Connection;
 

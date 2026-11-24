@@ -22,7 +22,8 @@ public class ConnectorIdentityTests
             ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow |
             ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.Merge |
             ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional |
-            ConnectorCapabilities.ColumnPartitionedWrites | ConnectorCapabilities.ReportsStats;
+            ConnectorCapabilities.ColumnPartitionedWrites | ConnectorCapabilities.ReportsStats |
+            ConnectorCapabilities.NestedTypes;
         Assert.Equal(expected, new DeltaLakeConnector().Capabilities);
     }
 

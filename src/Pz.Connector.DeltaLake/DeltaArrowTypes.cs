@@ -67,14 +67,27 @@ internal static class DeltaArrowTypes
         TimestampType t when t.Timezone is { Length: > 0 } tz && DenotesUtc(tz) && tz != "UTC" =>
             new TimestampType(t.Unit, "UTC"),
         ExtensionType e => e,
+        // A fixed-size list is written as a variable-size one: Delta has one list type, and its Arrow
+        // round-trip rejects the fixed-size shape on insert. The values are converted per batch by
+        // DeltaFixedSizeLists. Inside a map it is left as it is, so the type refusal names the column.
+        FixedSizeListType f => new ListType(Rewrap(f.ValueField, Canonical(f.ValueDataType))),
+        MapType m when ContainsFixedSizeList(m) => m,
         ListType l => Rewrap(l, Canonical),
         LargeListType l => Rewrap(l, Canonical),
         ListViewType l => Rewrap(l, Canonical),
         LargeListViewType l => Rewrap(l, Canonical),
-        FixedSizeListType f => Rewrap(f, Canonical),
         StructType s => Rewrap(s, Canonical),
         MapType m => Rewrap(m, Canonical),
         _ => type,
+    };
+
+    public static bool ContainsFixedSizeList(IArrowType type) => type switch
+    {
+        FixedSizeListType => true,
+        ListType l => ContainsFixedSizeList(l.ValueDataType),
+        StructType st => st.Fields.Any(f => ContainsFixedSizeList(f.DataType)),
+        MapType m => ContainsFixedSizeList(m.KeyField.DataType) || ContainsFixedSizeList(m.ValueField.DataType),
+        _ => false,
     };
 
     /// <summary>What delta-rs actually stores for an Arrow type it accepts — which is not always the
@@ -123,11 +136,8 @@ internal static class DeltaArrowTypes
         LargeListViewType l => AsList(l.ValueField, Stored),
         StructType s => Rewrap(s, Stored),
         MapType m => Rewrap(m, Stored),
-        // NOT observed, and unreachable through this sink: DeltaTypeSupport refuses FixedSizeList at
-        // BeginWriteAsync, so no create is ever made from one and there is no stored shape to have
-        // measured. Recursing keeps the inner type honest if that refusal is ever lifted; it does not
-        // claim to know what Delta does with the container.
-        FixedSizeListType f => Rewrap(f, Stored),
+        // Written as a variable-size list (see Canonical), so Delta stores a list.
+        FixedSizeListType f => AsList(f.ValueField, Stored),
         _ => type,
     };
 
