@@ -219,6 +219,22 @@ The guard's authority is the table's own partition columns, not `partition_by`. 
 honoured only when the table is created, so a run against a table an earlier run partitioned need not
 declare it.
 
+## Nested columns
+
+The sink declares the `NestedTypes` capability: list, struct and map columns, nested to any depth, are
+written as Delta `array`, `struct` and `map` columns, with nulls at every level. A fixed-size list (a
+DuckDB `ARRAY`) is stored as a Delta list, because delta-rs rejects the fixed-size shape on insert; it
+reads back as a variable-size list. A fixed-size list inside a map is refused by name with `PZDL0302`
+(cast it to a list in the pipeline SQL).
+
+A nested column cannot be a merge key (`PZDL0305`) or a partition column (`PZDL0302`): the error names
+the column and says a merge key or partition column must be a flat value. Derive a scalar in the
+pipeline SQL, for example a field of the struct. A nested column whose element or field types differ
+from the table's is a schema mismatch (`PZDL0301`) that names the column, with both types.
+
+Reads are a DuckDB `delta_scan`, so nested Delta columns arrive in the run as DuckDB `STRUCT`, `LIST`
+and `MAP` columns without conversion.
+
 ## `schema_policy: evolve`
 
 `evolve` means the same thing on every strategy — `append`, `replace` and `merge` alike: a column the

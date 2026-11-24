@@ -57,6 +57,18 @@ internal static class DeltaMergeDedup
             return;
         }
 
+        // A nested key is named for what it is: its values must never reach the merge predicate as
+        // anything but a flat value, whatever field names the data carries.
+        var nested = bad.Where(f => DeltaTypeSupport.IsNested(f.DataType)).ToList();
+        if (nested.Count > 0)
+        {
+            throw DeltaErrors.Fail(DeltaErrors.UnresolvableMergeKeyType,
+                $"output '{output}': merge key(s) {string.Join(", ", nested.Select(f => $"'{f.Name}'"))} " +
+                "are struct, list or map columns, and a merge key must be a flat value",
+                "use a scalar column as the merge key, and derive it in the pipeline SQL from the nested " +
+                "column (for example a field of the struct)");
+        }
+
         var named = string.Join(", ", bad.Select(f => $"'{f.Name}' ({f.DataType.Name})"));
         throw DeltaErrors.Fail(DeltaErrors.UnresolvableMergeKeyType,
             $"output '{output}': merge key(s) {named} have Arrow types this connector cannot compare " +

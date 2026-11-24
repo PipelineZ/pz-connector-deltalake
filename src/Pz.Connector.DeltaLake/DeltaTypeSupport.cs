@@ -37,6 +37,12 @@ namespace Pz.Connector.DeltaLake;
 /// not which columns the table partitions by.</summary>
 internal static class DeltaTypeSupport
 {
+    /// <summary>Struct, list or map, however encoded.</summary>
+    public static bool IsNested(IArrowType type) => type is DictionaryType d
+        ? IsNested(d.ValueType)
+        : type.TypeId is ArrowTypeId.Struct or ArrowTypeId.List or ArrowTypeId.LargeList or
+            ArrowTypeId.ListView or ArrowTypeId.LargeListView or ArrowTypeId.FixedSizeList or ArrowTypeId.Map;
+
     public static bool IsWritable(IArrowType type) => type.TypeId switch
     {
         // No Delta physical type exists for these at all: Null, HalfFloat, Interval, Duration,
@@ -45,20 +51,10 @@ internal static class DeltaTypeSupport
         ArrowTypeId.Null or ArrowTypeId.HalfFloat or ArrowTypeId.Interval or ArrowTypeId.Duration or
             ArrowTypeId.Time32 or ArrowTypeId.Time64 or ArrowTypeId.Decimal32 or ArrowTypeId.Decimal64 or
             ArrowTypeId.Decimal256 or ArrowTypeId.RunEndEncoded or ArrowTypeId.Union => false,
-        // FixedSizeList is the one candidate where CREATE and INSERT disagreed: CREATE accepts a
-        // fixed_size_list column, but a real INSERT through DeltaLake.Net 0.33.0 fails --
-        // "column types must match schema types, expected List(Int64, field: 'element') but found
-        // List(Int64)" at first read as an FFI marshaling defect. It is narrower than that: Delta's
-        // canonical Arrow round-trip expects the list's inner field named "element"; Apache.Arrow's
-        // own `new FixedSizeListType(valueType, listSize)` constructor -- the shape this connector's
-        // own type-construction path uses -- names it "item" instead. Verified directly: rebuilding
-        // the same probe with the inner field explicitly named "element" makes BOTH create and insert
-        // succeed. So this is not a permanent block on ARRAY-shaped columns, only on the default Arrow
-        // field name this connector currently produces for one -- refusing is still correct today
-        // (nothing in this connector names that field "element" yet), but a future task that wants to
-        // support ARRAY columns should rename the inner field before assuming FixedSizeList is a dead
-        // end. Since this guard protects the write path (BeginWriteAsync), not the create path, the
-        // stricter (insert) observation governs regardless: refused as the connector stands today.
+        // Delta's Arrow round-trip rejects a fixed-size list on insert, so DeltaArrowTypes.Canonical
+        // rewrites one to a variable-size list before this predicate runs and DeltaFixedSizeLists
+        // converts the values. One that survives canonicalisation sits inside a map, which is not
+        // converted, and is refused here.
         ArrowTypeId.FixedSizeList => false,
         // Delta stores every timestamp as an instant in UTC, so delta-rs accepts a timezone of "UTC",
         // an empty one or none at all and refuses every other string outright — measured, with the
@@ -99,6 +95,18 @@ internal static class DeltaTypeSupport
         // Ordinal, and it has to stay Ordinal: Delta column names are case-sensitive. A partition
         // column the write does not carry is Reconcile's problem, not this one.
         var names = partitionColumns.ToHashSet(StringComparer.Ordinal);
+        var nested = schema.FieldsList
+            .Where(f => names.Contains(f.Name) && IsNested(f.DataType))
+            .Select(f => $"'{f.Name}'")
+            .ToList();
+        if (nested.Count > 0)
+        {
+            throw DeltaErrors.Fail(DeltaErrors.UnwritableArrowType,
+                $"output '{output}': partition column(s) {string.Join(", ", nested)} are struct, list or map " +
+                "columns, and a partition column must be a flat value",
+                "partition by a scalar column, derived in the pipeline SQL from the nested one if need be");
+        }
+
         var bad = schema.FieldsList
             .Where(f => names.Contains(f.Name) && f.DataType is DictionaryType)
             .Select(f => $"'{f.Name}'")

@@ -29,7 +29,9 @@ internal sealed class DeltaWriteSession(
         ct.ThrowIfCancellationRequested();
         RefuseEmptyPartitionValues(batch, tablePartitions, output);
 
-        var clone = batch.Clone();
+        // Before the clone: the converted batch shares the engine-owned buffers, and the clone copies
+        // them out of the engine's pool.
+        var clone = DeltaFixedSizeLists.Apply(batch, schema).Clone();
         this.buffered.Add(clone);
         this.bufferedBytes += EstimateBytes(clone);
         this.rows += batch.Length;

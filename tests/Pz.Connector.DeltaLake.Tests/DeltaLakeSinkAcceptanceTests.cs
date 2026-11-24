@@ -43,6 +43,9 @@ public class DeltaLakeSinkAcceptanceTests : SinkConnectorAcceptanceTests, IDispo
     protected override OutputSpec? MergeOutput =>
         new("lake", "merged", "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id"] };
 
+    protected override OutputSpec? NestedOutput =>
+        new("lake", "nested", "append", "fail_on_change", new Dictionary<string, object?>());
+
     /// <summary>Each merge fact starts from a clean table: the base suite writes to a persistent
     /// destination, and a leftover from the previous fact would make an upsert assertion pass or fail
     /// for the wrong reason.</summary>
