@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
 ### Added
 
 - The sink declares `NestedTypes`: list, struct and map columns (and fixed-size lists, written as Delta
